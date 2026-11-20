@@ -35,8 +35,15 @@ export function primaryRepo(t: Template): TemplateRepo {
   return t.repos.find((r) => r.primary) ?? t.repos[0]!;
 }
 
+/** Repos with ref overrides applied, primary repo first. */
 export function resolveRefs(t: Template, overrides: Record<string, string> = {}) {
   const unknown = Object.keys(overrides).filter((k) => !t.repos.some((r) => r.name === k));
   if (unknown.length) throw new Error(`unknown repo(s) in refs: ${unknown.join(", ")}`);
-  return t.repos.map((r) => ({ name: r.name, url: r.url, ref: overrides[r.name] ?? r.ref }));
+  const primary = primaryRepo(t);
+  const ordered = [primary, ...t.repos.filter((r) => r !== primary)];
+  return ordered.map((r) => ({ name: r.name, url: r.url, ref: overrides[r.name] ?? r.ref }));
+}
+
+export function devcontainerPathFor(t: Template): string {
+  return t.devcontainerPath ?? `templates/${t.name}/.devcontainer/devcontainer.json`;
 }

@@ -31,8 +31,8 @@ describe("core", () => {
 
   test("resolveRefs applies overrides and rejects unknown repos", () => {
     expect(resolveRefs(tpl, { web: "feat/x" })).toEqual([
-      { name: "web", url: "git@github.com:me/web.git", ref: "feat/x" },
       { name: "api", url: "git@github.com:me/api.git", ref: "develop" },
+      { name: "web", url: "git@github.com:me/web.git", ref: "feat/x" },
     ]);
     expect(() => resolveRefs(tpl, { nope: "x" })).toThrow();
   });

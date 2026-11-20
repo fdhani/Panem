@@ -28,8 +28,8 @@ export const Template = z.object({
   name: Slug,
   description: z.string().default(""),
   repos: z.array(TemplateRepo).min(1),
-  /** Path inside the workspace repo, relative to its root. */
-  devcontainerPath: z.string().min(1),
+  /** Path inside the workspace repo, relative to its root. Defaults to the template's .devcontainer folder. */
+  devcontainerPath: z.string().min(1).optional(),
 });
 export type Template = z.infer<typeof Template>;
 
@@ -63,6 +63,7 @@ export const PodMeta = z.object({
   id: z.string(),
   template: z.string(),
   machine: z.string(),
+  /** Primary repo first. */
   repos: z.array(z.object({ name: z.string(), url: z.string(), ref: z.string() })),
   /** Workspace repo commit the pod's context was taken from (base for 3-way export merge). */
   workspaceSha: z.string(),
