@@ -68,4 +68,10 @@ chmod 600 "$CLAUDE_JSON"
 
 # ---- 4. record pod metadata (used by controller rediscovery) ----
 printf '%s\n' "$POD" | jq '.' >"$PANEM_STATE_DIR/pod.json"
+
+# Persist the token for later starts: backends may not re-inject env on start.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  mkdir -p "$HOME/.config/panem"
+  (umask 077 && printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$CLAUDE_CODE_OAUTH_TOKEN" >"$HOME/.config/panem/env")
+fi
 log "context ready"

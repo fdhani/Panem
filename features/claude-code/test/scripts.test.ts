@@ -106,7 +106,15 @@ test("start-rc launches remote control in the primary repo with the token", asyn
   expect(sh("tmux list-sessions -F '#S'")).toBe("panem-rc\n");
 });
 
+test("start-rc reuses the token saved at create time", async () => {
+  const { CLAUDE_CODE_OAUTH_TOKEN: _, PANEM_POD: __, ...rest } = env;
+  rmSync(join(root, "claude-token"), { force: true });
+  sh(`bash ${scripts}/start-rc.sh`, root, rest);
+  for (let i = 0; i < 50 && !existsSync(join(root, "claude-token")); i++) await Bun.sleep(100);
+  expect(readFileSync(join(root, "claude-token"), "utf8").trim()).toBe("tok-123");
+});
+
 test("start-rc skips cleanly without credentials", () => {
   const { CLAUDE_CODE_OAUTH_TOKEN: _, ...rest } = env;
-  sh(`bash ${scripts}/start-rc.sh`, root, rest);
+  sh(`bash ${scripts}/start-rc.sh`, root, { ...rest, HOME: join(root, "empty-home") });
 });

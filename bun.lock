@@ -13,6 +13,9 @@
     "packages/backend-devpod": {
       "name": "@panem/backend-devpod",
       "version": "0.1.0",
+      "dependencies": {
+        "@panem/core": "workspace:*",
+      },
     },
     "packages/cli": {
       "name": "@panem/cli",

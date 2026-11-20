@@ -4,6 +4,12 @@
 # shellcheck disable=SC1091
 [ -f /usr/local/share/panem/feature.env ] && . /usr/local/share/panem/feature.env
 
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -f "$HOME/.config/panem/env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.config/panem/env"
+  export CLAUDE_CODE_OAUTH_TOKEN
+fi
+
 PANEM_WORKSPACE_ROOT="${PANEM_WORKSPACE_ROOT:-/workspace}"
 PANEM_STATE_DIR="$PANEM_WORKSPACE_ROOT/.panem"
 CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
