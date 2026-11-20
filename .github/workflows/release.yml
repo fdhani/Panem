@@ -1,0 +1,37 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run build:web
+      - run: |
+          for t in bun-linux-x64 bun-linux-arm64 bun-darwin-arm64 bun-darwin-x64; do
+            bun scripts/build.ts --target=$t
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/panem-*
+
+  feature:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: devcontainers/action@v1
+        with:
+          publish-features: "true"
+          base-path-to-features: features/claude-code/src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

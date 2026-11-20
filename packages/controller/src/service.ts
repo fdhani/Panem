@@ -1,0 +1,457 @@
+import {
+  type AddMachineRequest,
+  type BackendPod,
+  type Job,
+  type Machine,
+  type MachineStatus,
+  type Pod,
+  type PodBackend,
+  PodMeta,
+  type PodState,
+  type ServerEvent,
+  type SummonRequest,
+  devcontainerPathFor,
+  machineProviderName,
+  newPodId,
+  resolveRefs,
+} from "@panem/core";
+import { exportMemory } from "./exporter";
+import type { WorkspaceRepo } from "./git";
+import type { HostProbe } from "./probe";
+import type { JobStore, PodStore } from "./stores";
+import type { Templates } from "./templates";
+
+export class HttpError extends Error {
+  constructor(
+    readonly status: 400 | 404 | 409 | 500 | 502,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+interface Op {
+  state: PodState;
+  error?: string;
+}
+
+export interface ServiceDeps {
+  backend: PodBackend;
+  repo: WorkspaceRepo;
+  templates: Templates;
+  pods: PodStore;
+  jobs: JobStore;
+  probe: HostProbe;
+  claudeOauthToken?: string;
+  log?: (msg: string) => void;
+}
+
+/**
+ * All controller behaviour. HTTP is a thin layer on top of this.
+ * Pod state = in-flight controller operation if any, otherwise what the backend reports.
+ */
+export class PodService {
+  private readonly ops = new Map<string, Op>();
+  private readonly lastStatus = new Map<string, BackendPod["status"]>();
+  private machineCache: Machine[] = [];
+  private backendPods: BackendPod[] = [];
+  private readonly listeners = new Set<(e: ServerEvent) => void>();
+  private lastSent = new Map<string, string>();
+  private queue: Promise<void> = Promise.resolve();
+  private readonly log: (msg: string) => void;
+
+  constructor(private readonly d: ServiceDeps) {
+    this.log = d.log ?? ((m) => console.log(`[panem] ${m}`));
+  }
+
+  // ---------- events ----------
+
+  subscribe(fn: (e: ServerEvent) => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private emit(e: ServerEvent, force = false) {
+    const key = e.type;
+    const body = JSON.stringify(e);
+    if (!force && this.lastSent.get(key) === body) return;
+    this.lastSent.set(key, body);
+    for (const l of this.listeners) l(e);
+  }
+
+  snapshot(): ServerEvent[] {
+    return [
+      { type: "machines", machines: this.machineCache },
+      { type: "pods", pods: this.podList() },
+      { type: "jobs", jobs: this.d.jobs.all() },
+    ];
+  }
+
+  private publishPods() {
+    this.emit({ type: "pods", pods: this.podList() });
+    this.emit({ type: "jobs", jobs: this.d.jobs.all() });
+  }
+
+  private setOp(id: string, op: Op | undefined) {
+    if (op) this.ops.set(id, op);
+    else this.ops.delete(id);
+    this.publishPods();
+  }
+
+  /** Refresh machines and pods from the backend. Called by the poller. */
+  async refresh(): Promise<void> {
+    await this.refreshMachines();
+    try {
+      this.backendPods = await this.d.backend.list();
+      for (const p of this.backendPods) {
+        if (p.status !== "unknown") this.lastStatus.set(p.id, p.status);
+      }
+    } catch (e) {
+      this.log(`backend list failed: ${msg(e)}`);
+    }
+    this.publishPods();
+  }
+
+  // ---------- machines ----------
+
+  async refreshMachines(): Promise<Machine[]> {
+    const ms = await this.d.backend.listMachines();
+    const st = await this.d.probe.status(ms);
+    this.machineCache = ms.map((m) => ({ ...m, status: st.get(m.host) ?? "unknown" }));
+    this.emit({ type: "machines", machines: this.machineCache });
+    return this.machineCache;
+  }
+
+  machines(): Machine[] {
+    return this.machineCache;
+  }
+
+  private machineStatus(name: string): MachineStatus {
+    return this.machineCache.find((m) => m.name === name)?.status ?? "unknown";
+  }
+
+  async addMachine(req: AddMachineRequest): Promise<Machine> {
+    const name = machineProviderName(req.host);
+    if ((await this.d.backend.listMachines()).some((m) => m.name === name)) {
+      throw new HttpError(409, `machine ${name} already registered`);
+    }
+    await this.d.backend.addMachine({ name, host: req.host, user: req.user });
+    const ms = await this.refreshMachines();
+    return ms.find((m) => m.name === name)!;
+  }
+
+  async removeMachine(name: string): Promise<void> {
+    if (this.podList().some((p) => p.machine === name)) {
+      throw new HttpError(409, `machine ${name} still has pods`);
+    }
+    await this.d.backend.removeMachine(name);
+    await this.refreshMachines();
+  }
+
+  // ---------- pods ----------
+
+  podList(): Pod[] {
+    const metas = new Map(this.d.pods.all().map((p) => [p.id, p]));
+    // Pods DevPod knows about but the cache doesn't (e.g. lost pods.json) still show up.
+    for (const b of this.backendPods) {
+      if (!metas.has(b.id)) {
+        metas.set(b.id, {
+          id: b.id,
+          template: b.id.replace(/-[a-z0-9]{6}$/, ""),
+          machine: b.machine,
+          repos: [],
+          workspaceSha: "",
+          createdAt: "",
+        });
+      }
+    }
+    return [...metas.values()]
+      .map((m) => this.toPod(m))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  private toPod(meta: PodMeta): Pod {
+    const op = this.ops.get(meta.id);
+    const machineStatus = this.machineStatus(meta.machine);
+    if (op) return { ...meta, state: op.state, error: op.error, machineStatus };
+    const job = this.d.jobs.forPod(meta.id);
+    if (job?.status === "failed") {
+      return { ...meta, state: "error", error: job.error, machineStatus };
+    }
+    const b = this.backendPods.find((p) => p.id === meta.id);
+    const status = b?.status === "unknown" ? this.lastStatus.get(meta.id) : b?.status;
+    let state: PodState;
+    let error: string | undefined;
+    switch (status) {
+      case "running":
+        state = "running";
+        break;
+      case "busy":
+        state = "starting";
+        break;
+      case "notfound":
+        state = "error";
+        error = "pod not found on machine";
+        break;
+      case undefined:
+        // Not listed by the backend yet (or machine unreachable before first status).
+        state = b ? "stopped" : "error";
+        if (!b) error = "pod not known to backend";
+        break;
+      default:
+        state = "stopped";
+    }
+    return { ...meta, state, error, machineStatus };
+  }
+
+  get(id: string): Pod {
+    const p = this.podList().find((x) => x.id === id);
+    if (!p) throw new HttpError(404, `pod ${id} not found`);
+    return p;
+  }
+
+  async summon(req: SummonRequest): Promise<Pod> {
+    const template = await this.d.templates.get(req.template);
+    if (!template) throw new HttpError(404, `template ${req.template} not found`);
+    const machines = await this.refreshMachines();
+    const machine = machines.find((m) => m.name === req.machine);
+    if (!machine) throw new HttpError(404, `machine ${req.machine} not registered`);
+    if (machine.status === "offline") throw new HttpError(409, `machine ${req.machine} is offline`);
+    let repos: PodMeta["repos"];
+    try {
+      repos = resolveRefs(template, req.refs);
+    } catch (e) {
+      throw new HttpError(400, msg(e));
+    }
+    const workspaceSha = await this.d.repo.sync();
+    const meta = PodMeta.parse({
+      id: newPodId(template.name),
+      template: template.name,
+      machine: machine.name,
+      repos,
+      workspaceSha,
+      createdAt: new Date().toISOString(),
+    });
+    await this.d.pods.put(meta);
+    this.setOp(meta.id, { state: "creating" });
+
+    const env: Record<string, string> = { PANEM_POD: JSON.stringify(meta) };
+    if (this.d.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.d.claudeOauthToken;
+    void this.d.backend
+      .up({
+        id: meta.id,
+        machine: machine.name,
+        source: this.d.repo.url,
+        sourceRef: this.d.repo.branch,
+        devcontainerPath: devcontainerPathFor(template),
+        env,
+      })
+      .then(
+        () => {
+          this.lastStatus.set(meta.id, "running");
+          this.upsertBackend({ id: meta.id, machine: machine.name, status: "running" });
+          this.setOp(meta.id, undefined);
+          this.log(`pod ${meta.id} is up on ${machine.name}`);
+        },
+        (e) => {
+          this.log(`pod ${meta.id} failed to start: ${msg(e)}`);
+          this.setOp(meta.id, { state: "error", error: msg(e) });
+        },
+      );
+    return this.get(meta.id);
+  }
+
+  private upsertBackend(p: BackendPod) {
+    this.backendPods = [...this.backendPods.filter((x) => x.id !== p.id), p];
+  }
+
+  private assertIdle(id: string): Pod {
+    const pod = this.get(id);
+    const op = this.ops.get(id);
+    if (op && op.state !== "error") throw new HttpError(409, `pod ${id} is busy (${op.state})`);
+    return pod;
+  }
+
+  async stop(id: string): Promise<Pod> {
+    const pod = this.assertIdle(id);
+    if (pod.machineStatus === "offline") throw new HttpError(409, "machine is offline");
+    await this.runOp(id, "stopping", () => this.d.backend.stop(id), "stopped");
+    return this.get(id);
+  }
+
+  async start(id: string): Promise<Pod> {
+    const pod = this.assertIdle(id);
+    if (pod.machineStatus === "offline") throw new HttpError(409, "machine is offline");
+    await this.runOp(id, "starting", () => this.d.backend.start(id), "running");
+    return this.get(id);
+  }
+
+  /** Long-running ops return immediately; progress arrives over SSE. */
+  private async runOp(
+    id: string,
+    state: PodState,
+    fn: () => Promise<void>,
+    done: BackendPod["status"],
+  ) {
+    this.setOp(id, { state });
+    void fn().then(
+      () => {
+        this.lastStatus.set(id, done);
+        const meta = this.d.pods.get(id);
+        this.upsertBackend({ id, machine: meta?.machine ?? "", status: done });
+        this.setOp(id, undefined);
+      },
+      (e) => this.setOp(id, { state: "error", error: msg(e) }),
+    );
+  }
+
+  /**
+   * Delete = export memory, then remove. Offline machines block delete unless forced;
+   * force skips export and discards the pod's memory.
+   */
+  async delete(id: string, force = false): Promise<Pod | undefined> {
+    const pod = this.get(id);
+    const op = this.ops.get(id);
+    if (op && op.state !== "error" && !force) {
+      throw new HttpError(409, `pod ${id} is busy (${op.state})`);
+    }
+    if (force) {
+      await this.d.backend.delete(id, { force: true });
+      await this.forget(id);
+      return undefined;
+    }
+    if (pod.machineStatus === "offline") {
+      throw new HttpError(
+        409,
+        "machine is offline: memory can't be exported. Use force delete to discard it.",
+      );
+    }
+    const existing = this.d.jobs.forPod(id);
+    const now = new Date().toISOString();
+    const job: Job = existing
+      ? { ...existing, status: "pending", error: undefined, updatedAt: now }
+      : {
+          id: `job-${id}-${Date.now()}`,
+          kind: "export-delete",
+          podId: id,
+          status: "pending",
+          attempts: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+    await this.d.jobs.put(job);
+    this.setOp(id, { state: "exporting" });
+    this.enqueue(job.id);
+    return this.get(id);
+  }
+
+  retryExport(id: string): Promise<Pod | undefined> {
+    const job = this.d.jobs.forPod(id);
+    if (!job || job.status !== "failed") throw new HttpError(409, "no failed export for this pod");
+    return this.delete(id);
+  }
+
+  private async forget(id: string) {
+    const job = this.d.jobs.forPod(id);
+    if (job) await this.d.jobs.remove(job.id);
+    await this.d.pods.remove(id);
+    this.backendPods = this.backendPods.filter((p) => p.id !== id);
+    this.lastStatus.delete(id);
+    this.setOp(id, undefined);
+  }
+
+  /** Resume jobs left pending or running by a previous controller process. */
+  async resumeJobs(): Promise<void> {
+    for (const j of this.d.jobs.all()) {
+      if (j.status === "pending" || j.status === "running") {
+        await this.d.jobs.put({ ...j, status: "pending" });
+        this.ops.set(j.podId, { state: "exporting" });
+        this.enqueue(j.id);
+      }
+    }
+  }
+
+  /** Exports run strictly one at a time. */
+  private enqueue(jobId: string) {
+    this.queue = this.queue.then(() => this.runJob(jobId)).catch(() => {});
+  }
+
+  /** Resolves when every queued job has finished (for tests and shutdown). */
+  idle(): Promise<void> {
+    return this.queue;
+  }
+
+  private async runJob(jobId: string): Promise<void> {
+    let job = this.d.jobs.get(jobId);
+    if (!job || job.status === "done") return;
+    const meta = this.d.pods.get(job.podId);
+    const update = async (patch: Partial<Job>) => {
+      job = { ...job!, ...patch, updatedAt: new Date().toISOString() };
+      await this.d.jobs.put(job);
+    };
+    await update({ status: "running", attempts: job.attempts + 1 });
+    try {
+      if (meta) {
+        // devpod ssh doesn't start stopped pods.
+        const status = await this.backendStatus(meta.id);
+        if (status === "stopped") {
+          this.setOp(meta.id, { state: "starting" });
+          await this.d.backend.start(meta.id);
+        }
+        this.setOp(meta.id, { state: "exporting" });
+        const r = await exportMemory(this.d.backend, this.d.repo, meta);
+        this.log(
+          r.commit
+            ? `exported ${r.files.length} memory file(s) from ${meta.id} (${r.commit.slice(0, 8)})`
+            : `no memory changes in ${meta.id}`,
+        );
+      }
+      this.setOp(job.podId, { state: "deleting" });
+      await this.d.backend.delete(job.podId);
+      await update({ status: "done" });
+      await this.forget(job.podId);
+    } catch (e) {
+      this.log(`export/delete of ${job.podId} failed: ${msg(e)}`);
+      await update({ status: "failed", error: msg(e) });
+      this.setOp(job.podId, undefined);
+    }
+  }
+
+  private async backendStatus(id: string): Promise<BackendPod["status"]> {
+    try {
+      const list = await this.d.backend.list();
+      return list.find((p) => p.id === id)?.status ?? "notfound";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /** Rebuild the metadata cache from pods' own pod.json files. */
+  async rediscover(): Promise<{ found: string[]; failed: string[] }> {
+    const list = await this.d.backend.list();
+    const found: string[] = [];
+    const failed: string[] = [];
+    for (const b of list) {
+      if (this.d.pods.get(b.id)) continue;
+      try {
+        if (b.status !== "running") throw new Error("not running");
+        const r = await this.d.backend.exec(b.id, "cat /workspace/.panem/pod.json");
+        if (r.exitCode !== 0) throw new Error(r.stderr);
+        const meta = PodMeta.parse({
+          ...JSON.parse(new TextDecoder().decode(r.stdout)),
+          machine: b.machine,
+        });
+        await this.d.pods.put(meta);
+        found.push(b.id);
+      } catch {
+        failed.push(b.id);
+      }
+    }
+    await this.refresh();
+    return { found, failed };
+  }
+}
+
+export function msg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}

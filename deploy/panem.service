@@ -1,0 +1,19 @@
+# systemd *user* unit: DevPod state (~/.devpod), SSH keys, and git credentials all live in
+# the user's home, so the controller runs as that user. Installed by deploy/install.sh.
+[Unit]
+Description=Panem controller (agent pods on your own machines)
+Documentation=https://github.com/fdhani/panem
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/panem serve
+Restart=always
+RestartSec=5
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Keep the controller's own files private.
+UMask=0077
+
+[Install]
+WantedBy=default.target

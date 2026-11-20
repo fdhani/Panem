@@ -1,0 +1,15 @@
+{
+  "name": "@panem/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "panem": "src/main.ts"
+  },
+  "main": "src/main.ts",
+  "dependencies": {
+    "@panem/controller": "workspace:*",
+    "@panem/core": "workspace:*",
+    "citty": "^0.1.6"
+  }
+}

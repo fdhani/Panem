@@ -1,0 +1,51 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  DEVPOD_VERSION: v0.6.15 # keep in sync with DEVPOD_VERSION in packages/backend-devpod
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panem-linux-x64
+          path: dist/panem
+
+  feature:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: shellcheck features/claude-code/src/claude-code/install.sh features/claude-code/src/claude-code/scripts/*.sh
+      - run: npm install -g @devcontainers/cli@0.72.0
+      - run: devcontainer features test --project-folder features/claude-code --features claude-code --base-image mcr.microsoft.com/devcontainers/base:ubuntu
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Install DevPod
+        run: |
+          curl -fsSL -o /usr/local/bin/devpod \
+            "https://github.com/loft-sh/devpod/releases/download/${DEVPOD_VERSION}/devpod-linux-amd64"
+          chmod +x /usr/local/bin/devpod
+          devpod version
+      - run: bun scripts/integration.ts

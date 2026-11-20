@@ -1,0 +1,7 @@
+{
+  "description": "Frontend + API",
+  "repos": [
+    { "name": "api", "url": "git@github.com:you/api.git", "ref": "main", "primary": true },
+    { "name": "web", "url": "git@github.com:you/web.git", "ref": "main" }
+  ]
+}
