@@ -1,0 +1,213 @@
+#!/usr/bin/env bun
+import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import type { Machine, Pod } from "@panem/core";
+import { Config, configPath, loadConfig, saveConfig } from "@panem/core";
+import { defineCommand, runMain } from "citty";
+import { client, table } from "./client";
+
+export const VERSION = "0.1.0";
+
+const serve = defineCommand({
+  meta: { name: "serve", description: "Run the controller (API + web UI)" },
+  async run() {
+    const { serve } = await import("@panem/controller");
+    await serve(await loadConfig());
+    await new Promise(() => {});
+  },
+});
+
+const init = defineCommand({
+  meta: { name: "init", description: "Write ~/.config/panem/config.json" },
+  args: {
+    "workspace-repo": {
+      type: "string",
+      description: "Git URL of your workspace repo",
+      required: true,
+    },
+    branch: { type: "string", default: "main" },
+    port: { type: "string", default: "7420" },
+    "claude-token": {
+      type: "string",
+      description: "Token from `claude setup-token` (or set CLAUDE_CODE_OAUTH_TOKEN)",
+    },
+    devpod: { type: "string", default: "devpod", description: "Path to the devpod binary" },
+    force: { type: "boolean", description: "Overwrite an existing config" },
+  },
+  async run({ args }) {
+    const path = configPath();
+    if (existsSync(path) && !args.force) {
+      throw new Error(`${path} exists; pass --force to overwrite`);
+    }
+    const cfg = Config.parse({
+      workspaceRepoUrl: args["workspace-repo"],
+      workspaceBranch: args.branch,
+      apiToken: randomBytes(24).toString("base64url"),
+      claudeOauthToken: args["claude-token"] ?? process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      port: Number(args.port),
+      devpodPath: args.devpod,
+    });
+    await saveConfig(cfg, path);
+    console.log(`wrote ${path}`);
+    console.log(`API token (paste into the web UI settings): ${cfg.apiToken}`);
+    if (!cfg.claudeOauthToken) {
+      console.log("No Claude token set: pods will need a manual `claude /login`.");
+      console.log("Run `claude setup-token`, then `panem init --force --claude-token ...`.");
+    }
+  },
+});
+
+const token = defineCommand({
+  meta: { name: "token", description: "Print the API token for the web UI" },
+  async run() {
+    console.log((await loadConfig()).apiToken);
+  },
+});
+
+const machine = defineCommand({
+  meta: { name: "machine", description: "Manage machines" },
+  subCommands: {
+    ls: defineCommand({
+      meta: { name: "ls", description: "List machines" },
+      async run() {
+        const ms = await (await client()).call<Machine[]>("GET", "/api/machines");
+        console.log(
+          table([
+            ["NAME", "HOST", "STATUS"],
+            ...ms.map((m) => [m.name, m.user ? `${m.user}@${m.host}` : m.host, m.status]),
+          ]),
+        );
+      },
+    }),
+    add: defineCommand({
+      meta: { name: "add", description: "Register a machine by Tailscale hostname" },
+      args: {
+        host: { type: "positional", required: true },
+        user: { type: "string", description: "SSH user" },
+      },
+      async run({ args }) {
+        const m = await (await client()).call<Machine>("POST", "/api/machines", {
+          host: args.host,
+          user: args.user,
+        });
+        console.log(`added ${m.name} (${m.status})`);
+      },
+    }),
+    rm: defineCommand({
+      meta: { name: "rm", description: "Remove a machine" },
+      args: { name: { type: "positional", required: true } },
+      async run({ args }) {
+        await (await client()).call(
+          "DELETE",
+          `/api/machines/${encodeURIComponent(String(args.name))}`,
+        );
+        console.log(`removed ${args.name}`);
+      },
+    }),
+  },
+});
+
+const podId = { id: { type: "positional", required: true } } as const;
+
+const pod = defineCommand({
+  meta: { name: "pod", description: "Manage pods" },
+  subCommands: {
+    ls: defineCommand({
+      meta: { name: "ls", description: "List pods across machines" },
+      async run() {
+        const ps = await (await client()).call<Pod[]>("GET", "/api/pods");
+        console.log(
+          table([
+            ["ID", "STATE", "MACHINE", "TEMPLATE", "REFS"],
+            ...ps.map((p) => [
+              p.id,
+              p.state,
+              `${p.machine}${p.machineStatus === "offline" ? " (offline)" : ""}`,
+              p.template,
+              p.repos.map((r) => `${r.name}@${r.ref}`).join(" "),
+            ]),
+          ]),
+        );
+      },
+    }),
+    summon: defineCommand({
+      meta: { name: "summon", description: "Create a pod from a template" },
+      args: {
+        template: { type: "positional", required: true },
+        machine: { type: "string", alias: "m", required: true },
+        ref: { type: "string", description: "repo=ref overrides, comma separated" },
+      },
+      async run({ args }) {
+        const ref = typeof args.ref === "string" ? args.ref : "";
+        const refs = ref
+          ? Object.fromEntries(ref.split(",").map((kv) => kv.split("=", 2) as [string, string]))
+          : undefined;
+        const m = String(args.machine);
+        const machine = m.startsWith("m-") ? m : `m-${m}`;
+        const p = await (await client()).call<Pod>("POST", "/api/pods", {
+          template: args.template,
+          machine,
+          refs,
+        });
+        console.log(`summoning ${p.id} on ${p.machine}`);
+      },
+    }),
+    stop: defineCommand({
+      meta: { name: "stop", description: "Stop a pod (keeps its disk)" },
+      args: podId,
+      async run({ args }) {
+        await (await client()).call("POST", `/api/pods/${args.id}/stop`);
+        console.log(`stopping ${args.id}`);
+      },
+    }),
+    start: defineCommand({
+      meta: { name: "start", description: "Start a stopped pod" },
+      args: podId,
+      async run({ args }) {
+        await (await client()).call("POST", `/api/pods/${args.id}/start`);
+        console.log(`starting ${args.id}`);
+      },
+    }),
+    rm: defineCommand({
+      meta: { name: "rm", description: "Export memory, then delete a pod" },
+      args: {
+        ...podId,
+        force: { type: "boolean", description: "Skip export and discard memory" },
+      },
+      async run({ args }) {
+        await (await client()).call(
+          "DELETE",
+          `/api/pods/${args.id}${args.force ? "?force=true" : ""}`,
+        );
+        console.log(args.force ? `deleted ${args.id}` : `exporting and deleting ${args.id}`);
+      },
+    }),
+    "retry-export": defineCommand({
+      meta: { name: "retry-export", description: "Retry a failed export" },
+      args: podId,
+      async run({ args }) {
+        await (await client()).call("POST", `/api/pods/${args.id}/retry-export`);
+        console.log(`retrying export of ${args.id}`);
+      },
+    }),
+  },
+});
+
+const rediscover = defineCommand({
+  meta: { name: "rediscover", description: "Rebuild pod metadata from the pods themselves" },
+  async run() {
+    const r = await (await client()).call<{ found: string[]; failed: string[] }>(
+      "POST",
+      "/api/rediscover",
+    );
+    console.log(`found: ${r.found.join(", ") || "none"}`);
+    if (r.failed.length) console.log(`could not read (start them first): ${r.failed.join(", ")}`);
+  },
+});
+
+export const main = defineCommand({
+  meta: { name: "panem", version: VERSION, description: "Agent pods on your own machines" },
+  subCommands: { serve, init, token, machine, pod, rediscover },
+});
+
+if (import.meta.main) runMain(main);
