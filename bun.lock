@@ -4,6 +4,11 @@
   "workspaces": {
     "": {
       "name": "panem",
+      "dependencies": {
+        "@panem/backend-devpod": "workspace:*",
+        "@panem/controller": "workspace:*",
+        "@panem/core": "workspace:*",
+      },
       "devDependencies": {
         "@biomejs/biome": "1.9.4",
         "@types/bun": "latest",
@@ -26,7 +31,7 @@
       "dependencies": {
         "@panem/controller": "workspace:*",
         "@panem/core": "workspace:*",
-        "citty": "0.1",
+        "citty": "^0.1.6",
       },
     },
     "packages/controller": {

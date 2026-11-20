@@ -74,16 +74,34 @@ export async function serve(config: Config) {
   const timer = setInterval(poll, 5000);
 
   // Only localhost and the Tailscale IP: never 0.0.0.0.
-  const hosts = new Set(config.listen);
-  const ts = await tailscaleIPv4();
-  if (ts) hosts.add(ts);
-  const servers = [...hosts].map((hostname) =>
-    Bun.serve({ hostname, port: config.port, fetch: app.fetch, idleTimeout: 0 }),
-  );
-  for (const s of servers) console.log(`[panem] listening on http://${s.hostname}:${s.port}`);
+  const servers: ReturnType<typeof Bun.serve>[] = [];
+  const bound = new Set<string>();
+  const bind = (hostname: string) => {
+    if (bound.has(hostname)) return;
+    const s = Bun.serve({ hostname, port: config.port, fetch: app.fetch, idleTimeout: 0 });
+    bound.add(hostname);
+    servers.push(s);
+    console.log(`[panem] listening on http://${s.hostname}:${s.port}`);
+  };
+  for (const h of config.listen) bind(h);
+  // tailscaled may come up after us at boot: keep looking for its IP.
+  const bindTailscale = async () => {
+    const ip = await tailscaleIPv4();
+    if (ip) {
+      try {
+        bind(ip);
+      } catch (e) {
+        console.warn(`[panem] could not bind ${ip}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    return ip;
+  };
+  if (!(await bindTailscale())) console.warn("[panem] no Tailscale IP yet; serving localhost only");
+  const tsTimer = setInterval(bindTailscale, 30_000);
 
   const stop = async () => {
     clearInterval(timer);
+    clearInterval(tsTimer);
     for (const s of servers) s.stop();
     process.exit(0);
   };

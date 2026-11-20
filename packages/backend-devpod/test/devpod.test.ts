@@ -48,6 +48,18 @@ describe("DevPodBackend", () => {
     expect(l).toContain('ENV PANEM_POD={"id":"x"}');
   });
 
+  test("up passes local folder sources without a branch suffix", async () => {
+    await dp.up({
+      id: "a",
+      machine: "m-local",
+      source: "/srv/ws",
+      sourceRef: "main",
+      devcontainerPath: "p",
+      env: {},
+    });
+    expect(calls()[0]).toStartWith("ARGS up /srv/ws --id a");
+  });
+
   test("up rejects env values with newlines", async () => {
     await expect(
       dp.up({

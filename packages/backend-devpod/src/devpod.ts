@@ -57,7 +57,9 @@ export class DevPodBackend implements PodBackend {
         return `${k}=${v}`;
       });
       await writeFile(envFile, `${lines.join("\n")}\n`, { mode: 0o600 });
-      const source = o.sourceRef ? `${o.source}@${o.sourceRef}` : o.source;
+      // Local folders (tests, single-machine setups) take no @branch suffix.
+      const local = /^(\/|\.\/|\.\.\/)/.test(o.source);
+      const source = o.sourceRef && !local ? `${o.source}@${o.sourceRef}` : o.source;
       await this.run(
         [
           "up",
