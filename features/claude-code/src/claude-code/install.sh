@@ -12,12 +12,12 @@ install_packages() {
   if command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y --no-install-recommends git tmux jq curl ca-certificates
+    apt-get install -y --no-install-recommends git tmux jq curl socat ca-certificates
     rm -rf /var/lib/apt/lists/*
   elif command -v apk >/dev/null; then
-    apk add --no-cache git tmux jq curl ca-certificates bash
+    apk add --no-cache git tmux jq curl socat ca-certificates bash
   elif command -v dnf >/dev/null; then
-    dnf install -y git tmux jq curl ca-certificates
+    dnf install -y git tmux jq curl socat ca-certificates
   else
     echo "panem: unsupported base image (need apt, apk, or dnf)" >&2
     exit 1
@@ -25,7 +25,7 @@ install_packages() {
 }
 
 missing=0
-for bin in git tmux jq curl; do command -v "$bin" >/dev/null || missing=1; done
+for bin in git tmux jq curl socat; do command -v "$bin" >/dev/null || missing=1; done
 [ "$missing" = 1 ] && install_packages
 
 mkdir -p "$SHARE"

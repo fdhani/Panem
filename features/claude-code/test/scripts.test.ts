@@ -56,6 +56,7 @@ beforeAll(() => {
     PANEM_WORKSPACE_ROOT: ws,
     PANEM_CONTEXT_DIR: ctx,
     CLAUDE_CODE_OAUTH_TOKEN: "tok-123",
+    PANEM_RELAY_SECRET: "sec-1",
     PANEM_POD: JSON.stringify({
       id: "shop-abc123",
       template: "shop",
@@ -113,6 +114,26 @@ test("start-rc reuses the token saved at create time", async () => {
   for (let i = 0; i < 50 && !existsSync(join(root, "claude-token")); i++) await Bun.sleep(100);
   expect(readFileSync(join(root, "claude-token"), "utf8").trim()).toBe("tok-123");
 });
+
+test.skipIf(!Bun.which("socat"))(
+  "post-start brings up the relay with the saved secret",
+  async () => {
+    const { PANEM_POD: _, PANEM_RELAY_SECRET: __, ...rest } = env;
+    const port = 17000 + Math.floor(Math.random() * 1000);
+    sh(`bash ${scripts}/post-start.sh`, root, { ...rest, PANEM_RELAY_PORT: String(port) });
+    expect(sh("tmux list-sessions -F '#S' | sort")).toBe("panem-rc\npanem-relay\n");
+    let reply = "";
+    for (let i = 0; i < 50 && !reply; i++) {
+      await Bun.sleep(50);
+      reply = Bun.spawnSync([
+        "bash",
+        "-c",
+        `printf 'sec-1 meta\\n' | socat -t 2 - TCP:127.0.0.1:${port}`,
+      ]).stdout.toString();
+    }
+    expect(JSON.parse(reply).id).toBe("shop-abc123");
+  },
+);
 
 test("start-rc skips cleanly without credentials", () => {
   const { CLAUDE_CODE_OAUTH_TOKEN: _, ...rest } = env;

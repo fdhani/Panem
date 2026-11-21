@@ -4,10 +4,15 @@
 # shellcheck disable=SC1091
 [ -f /usr/local/share/panem/feature.env ] && . /usr/local/share/panem/feature.env
 
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -f "$HOME/.config/panem/env" ]; then
+if [ -f "$HOME/.config/panem/env" ]; then
+  _tok="${CLAUDE_CODE_OAUTH_TOKEN:-}" _sec="${PANEM_RELAY_SECRET:-}"
   # shellcheck disable=SC1091
   . "$HOME/.config/panem/env"
-  export CLAUDE_CODE_OAUTH_TOKEN
+  # Values from the live environment win over the saved ones.
+  CLAUDE_CODE_OAUTH_TOKEN="${_tok:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
+  PANEM_RELAY_SECRET="${_sec:-${PANEM_RELAY_SECRET:-}}"
+  export CLAUDE_CODE_OAUTH_TOKEN PANEM_RELAY_SECRET
+  unset _tok _sec
 fi
 
 PANEM_WORKSPACE_ROOT="${PANEM_WORKSPACE_ROOT:-/workspace}"
