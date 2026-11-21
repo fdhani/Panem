@@ -1,12 +1,14 @@
 // End-to-end test against a real DevPod + Docker (run in CI; needs network for images).
 // Exercises: machine add, up with the claude-code Feature, context injection, stop/start,
-// memory export to a bare git repo, delete.
+// port exposure through the per-machine forwarder, memory export to a bare git repo, delete.
+// Needs the forwarder image built locally first (see .github/workflows/ci.yml).
 //   DEVPOD=/path/to/devpod bun scripts/integration.ts
 import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
-import { WorkspaceRepo, exportMemory } from "@panem/controller";
+import { ForwarderManager, SshShell, WorkspaceRepo, exportMemory } from "@panem/controller";
+import { Config, PANEM_VERSION } from "@panem/core";
 import { type PodMeta, claudeProjectDir, repoPath } from "@panem/core";
 
 const root = mkdtempSync(join(tmpdir(), "panem-it-"));
@@ -58,6 +60,20 @@ const meta: PodMeta = {
   workspaceSha,
   createdAt: new Date().toISOString(),
 };
+const RELAY_SECRET = "integration-relay-secret-0123";
+const cfg = Config.parse({
+  workspaceRepoUrl: origin,
+  apiToken: "integration-api-token-0123",
+  relaySecret: RELAY_SECRET,
+  forwarderToken: "integration-forwarder-0123",
+  // Built locally by CI before this script runs.
+  forwarder: { image: `ghcr.io/fdhani/panem/forwarder:${PANEM_VERSION}` },
+});
+// No Tailscale in CI: the forwarder publishes on 127.0.0.1.
+const forwarders = new ForwarderManager(cfg, new SshShell(), {
+  localAddress: async () => undefined,
+});
+const local = { name: "m-local", host: "local" };
 const run = async (cmd: string) => {
   const r = await dp.exec(id, cmd);
   return { code: r.exitCode, out: new TextDecoder().decode(r.stdout).trim(), err: r.stderr };
@@ -81,7 +97,11 @@ try {
     source: src,
     sourceRef: "main",
     devcontainerPath: "templates/it/.devcontainer/devcontainer.json",
-    env: { PANEM_POD: JSON.stringify(meta), CLAUDE_CODE_OAUTH_TOKEN: "dummy" },
+    env: {
+      PANEM_POD: JSON.stringify(meta),
+      CLAUDE_CODE_OAUTH_TOKEN: "dummy",
+      PANEM_RELAY_SECRET: RELAY_SECRET,
+    },
   });
   const listed = (await dp.list()).find((p) => p.id === id);
   assert(listed?.status === "running", `running after up (got ${listed?.status})`);
@@ -105,6 +125,25 @@ try {
   assert((await dp.status(id)) === "running", "running again");
   assert((await run(`cat ${memDir}/MEMORY.md`)).out.includes("learned in pod"), "memory kept");
 
+  step("ports exposed on the machine through the forwarder");
+  await forwarders.ensure(local);
+  // A loopback-only server inside the pod, like a dev server on localhost.
+  await run(
+    // (socat rewrites backslashes and double quotes in SYSTEM:, hence plain echo.)
+    "setsid nohup socat TCP-LISTEN:5173,bind=127.0.0.1,fork,reuseaddr SYSTEM:'sed -n /^.$/q; echo HTTP/1.0 200 OK; echo; echo from-pod' >/dev/null 2>&1 < /dev/null &",
+  );
+  let hostPort: number | undefined;
+  for (let i = 0; i < 40 && !hostPort; i++) {
+    await Bun.sleep(1000);
+    const st = await forwarders.state(local).catch(() => undefined);
+    hostPort = st?.pods
+      .find((p) => p.id === id)
+      ?.ports.find((p) => p.podPort === 5173 && p.live)?.hostPort;
+  }
+  assert(hostPort, "port 5173 mapped by the forwarder");
+  const body = await (await fetch(`http://127.0.0.1:${hostPort}/`)).text();
+  assert(body.includes("from-pod"), `proxied response (got ${JSON.stringify(body)})`);
+
   step("export");
   const r = await exportMemory(dp, repo, meta);
   assert(r.commit, "export committed");
@@ -114,9 +153,13 @@ try {
   step("delete");
   await dp.delete(id);
   assert(!(await dp.list()).some((p) => p.id === id), "deleted");
+  await forwarders.release(local, id);
+  assert(!(await forwarders.state(local)).pods.some((p) => p.id === id), "ports released");
+  await forwarders.remove(local);
   console.log("\nintegration test passed");
 } catch (e) {
   console.error(e);
   await dp.delete(id, { force: true }).catch(() => {});
+  await forwarders.remove(local).catch(() => {});
   process.exit(1);
 }
