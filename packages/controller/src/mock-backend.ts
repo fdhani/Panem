@@ -6,6 +6,9 @@ import {
   type BackendMachine,
   type BackendPod,
   type ExecResult,
+  type ForwarderState,
+  type ForwarderStatus,
+  PANEM_VERSION,
   type PodBackend,
   type UpOptions,
   claudeProjectDir,
@@ -129,4 +132,51 @@ export class MockBackend implements PodBackend {
 
 function fail(stderr: string): ExecResult {
   return { exitCode: 1, stdout: new Uint8Array(), stderr };
+}
+
+/** Fake forwarders for PANEM_BACKEND=mock: running pods get a block and two demo services. */
+export class MockForwarders {
+  readonly enabled = true;
+  private blocks = new Map<string, number>();
+  constructor(private readonly backend: MockBackend) {}
+
+  async linkHost(m: { host: string }) {
+    return m.host;
+  }
+
+  async state(m: { name: string }): Promise<ForwarderState> {
+    const pods = [...this.backend.pods.values()].filter((p) => p.machine === m.name);
+    return {
+      version: PANEM_VERSION,
+      unplaced: [],
+      pods: pods.map((p) => {
+        if (!this.blocks.has(p.id)) this.blocks.set(p.id, 7600 + this.blocks.size * 10);
+        const start = this.blocks.get(p.id)!;
+        const meta = JSON.parse(p.env.PANEM_POD ?? "{}") as { ports?: Record<string, string> };
+        const declared = Object.entries(meta.ports ?? { 5173: "web", 8000: "api" });
+        const running = p.status === "running";
+        return {
+          id: p.id,
+          block: [start, start + 9] as [number, number],
+          reachable: running,
+          unmapped: [],
+          ports: declared.map(([port, name], i) => ({
+            slot: i + 1,
+            hostPort: start + i + 1,
+            podPort: Number(port),
+            name,
+            live: running,
+          })),
+        };
+      }),
+    };
+  }
+
+  async ensure(): Promise<ForwarderStatus> {
+    return { status: "running", version: PANEM_VERSION };
+  }
+  async release(_m: unknown, podId: string) {
+    this.blocks.delete(podId);
+  }
+  async remove() {}
 }

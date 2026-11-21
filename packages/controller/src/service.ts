@@ -1,9 +1,12 @@
 import {
   type AddMachineRequest,
   type BackendPod,
+  type ForwarderState,
+  type ForwarderStatus,
   type Job,
   type Machine,
   type MachineStatus,
+  PANEM_VERSION,
   type Pod,
   type PodBackend,
   PodMeta,
@@ -16,6 +19,7 @@ import {
   resolveRefs,
 } from "@panem/core";
 import { exportMemory } from "./exporter";
+import type { Forwarders, MachineRef } from "./forwarders";
 import type { WorkspaceRepo } from "./git";
 import type { HostProbe } from "./probe";
 import type { JobStore, PodStore } from "./stores";
@@ -43,8 +47,19 @@ export interface ServiceDeps {
   jobs: JobStore;
   probe: HostProbe;
   claudeOauthToken?: string;
+  relaySecret?: string;
+  forwarders?: Forwarders;
   log?: (msg: string) => void;
 }
+
+interface FwdInfo {
+  status: ForwarderStatus;
+  state?: ForwarderState;
+  linkHost?: string;
+}
+
+/** How long to wait before automatically redeploying a forwarder that isn't answering. */
+const AUTO_REPAIR_MS = 5 * 60_000;
 
 /**
  * All controller behaviour. HTTP is a thin layer on top of this.
@@ -58,6 +73,10 @@ export class PodService {
   private readonly listeners = new Set<(e: ServerEvent) => void>();
   private lastSent = new Map<string, string>();
   private queue: Promise<void> = Promise.resolve();
+  private fwd = new Map<string, FwdInfo>();
+  /** True once backend.list() has succeeded, so "unknown pod" really means gone. */
+  private backendListed = false;
+  private lastRepair = new Map<string, number>();
   private readonly log: (msg: string) => void;
 
   constructor(private readonly d: ServiceDeps) {
@@ -103,6 +122,7 @@ export class PodService {
     await this.refreshMachines();
     try {
       this.backendPods = await this.d.backend.list();
+      this.backendListed = true;
       for (const p of this.backendPods) {
         if (p.status !== "unknown") this.lastStatus.set(p.id, p.status);
       }
@@ -117,9 +137,85 @@ export class PodService {
   async refreshMachines(): Promise<Machine[]> {
     const ms = await this.d.backend.listMachines();
     const st = await this.d.probe.status(ms);
-    this.machineCache = ms.map((m) => ({ ...m, status: st.get(m.host) ?? "unknown" }));
+    const statuses = ms.map((m) => ({ ...m, status: st.get(m.host) ?? "unknown" }) as Machine);
+    await Promise.all(
+      statuses.filter((m) => m.status !== "offline").map((m) => this.pollForwarder(m)),
+    );
+    this.machineCache = statuses.map((m) => ({ ...m, forwarder: this.fwd.get(m.name)?.status }));
     this.emit({ type: "machines", machines: this.machineCache });
     return this.machineCache;
+  }
+
+  /** One GET /state per machine; a forwarder that stops answering is redeployed now and then. */
+  private async pollForwarder(m: MachineRef) {
+    const f = this.d.forwarders;
+    if (!f?.enabled) {
+      if (f) this.fwd.set(m.name, { status: { status: "disabled" } });
+      return;
+    }
+    try {
+      const state = await f.state(m);
+      const status: ForwarderStatus = {
+        status: state.version === PANEM_VERSION ? "running" : "outdated",
+        version: state.version,
+      };
+      this.fwd.set(m.name, { status, state, linkHost: await f.linkHost(m) });
+      if (status.status === "outdated") void this.autoRepair(m);
+      // Blocks held for pods that no longer exist (e.g. force-deleted while offline).
+      if (this.backendListed) {
+        for (const p of state.pods) {
+          const known = this.d.pods.get(p.id) || this.backendPods.some((b) => b.id === p.id);
+          if (!known) {
+            this.log(`releasing ports of vanished pod ${p.id} on ${m.name}`);
+            await f.release(m, p.id).catch(() => {});
+          }
+        }
+      }
+    } catch (e) {
+      const prev = this.fwd.get(m.name);
+      this.fwd.set(m.name, {
+        status:
+          prev?.status.status === "error" ? prev.status : { status: "missing", error: msg(e) },
+      });
+      void this.autoRepair(m);
+    }
+  }
+
+  private async autoRepair(m: MachineRef) {
+    const last = this.lastRepair.get(m.name) ?? 0;
+    if (Date.now() - last < AUTO_REPAIR_MS) return;
+    this.lastRepair.set(m.name, Date.now());
+    try {
+      await this.repairMachine(m.name, m);
+    } catch {
+      // status already records the error
+    }
+  }
+
+  /** Deploy (or redeploy) the machine's forwarder. */
+  async repairMachine(name: string, ref?: MachineRef): Promise<ForwarderStatus> {
+    const f = this.d.forwarders;
+    if (!f?.enabled)
+      throw new HttpError(409, "port forwarding is not configured (run `panem init --force`)");
+    const m = ref ?? (await this.d.backend.listMachines()).find((x) => x.name === name);
+    if (!m) throw new HttpError(404, `machine ${name} not registered`);
+    this.lastRepair.set(m.name, Date.now());
+    try {
+      const status = await f.ensure(m);
+      this.fwd.set(m.name, { ...this.fwd.get(m.name), status });
+      this.log(`forwarder on ${m.name}: ${status.status}`);
+      return status;
+    } catch (e) {
+      const status: ForwarderStatus = { status: "error", error: msg(e) };
+      this.fwd.set(m.name, { ...this.fwd.get(m.name), status });
+      this.log(`forwarder on ${m.name} failed: ${msg(e)}`);
+      throw new HttpError(502, msg(e));
+    } finally {
+      this.machineCache = this.machineCache.map((x) =>
+        x.name === m.name ? { ...x, forwarder: this.fwd.get(m.name)?.status } : x,
+      );
+      this.emit({ type: "machines", machines: this.machineCache });
+    }
   }
 
   machines(): Machine[] {
@@ -136,6 +232,10 @@ export class PodService {
       throw new HttpError(409, `machine ${name} already registered`);
     }
     await this.d.backend.addMachine({ name, host: req.host, user: req.user });
+    if (this.d.forwarders?.enabled) {
+      // Deploy errors show on the machine (with Repair); they don't fail the add.
+      await this.repairMachine(name, { name, host: req.host, user: req.user }).catch(() => {});
+    }
     const ms = await this.refreshMachines();
     return ms.find((m) => m.name === name)!;
   }
@@ -144,6 +244,11 @@ export class PodService {
     if (this.podList().some((p) => p.machine === name)) {
       throw new HttpError(409, `machine ${name} still has pods`);
     }
+    const m = (await this.d.backend.listMachines()).find((x) => x.name === name);
+    if (m && this.d.forwarders?.enabled) {
+      await this.d.forwarders.remove(m).catch((e) => this.log(`forwarder removal: ${msg(e)}`));
+    }
+    this.fwd.delete(name);
     await this.d.backend.removeMachine(name);
     await this.refreshMachines();
   }
@@ -170,13 +275,32 @@ export class PodService {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
+  /** Links to the pod's services, from its machine's forwarder state. */
+  private exposedFor(meta: PodMeta): Pick<Pod, "exposed" | "indexUrl"> {
+    const info = this.fwd.get(meta.machine);
+    const p = info?.state?.pods.find((x) => x.id === meta.id);
+    if (!p || !info?.linkHost) return { exposed: [] };
+    const host = info.linkHost;
+    return {
+      indexUrl: `http://${host}:${p.block[0]}`,
+      exposed: p.ports.map((x) => ({
+        podPort: x.podPort,
+        hostPort: x.hostPort,
+        name: x.name,
+        live: x.live,
+        url: `http://${host}:${x.hostPort}`,
+      })),
+    };
+  }
+
   private toPod(meta: PodMeta): Pod {
     const op = this.ops.get(meta.id);
     const machineStatus = this.machineStatus(meta.machine);
-    if (op) return { ...meta, state: op.state, error: op.error, machineStatus };
+    const ports = this.exposedFor(meta);
+    if (op) return { ...meta, ...ports, state: op.state, error: op.error, machineStatus };
     const job = this.d.jobs.forPod(meta.id);
     if (job?.status === "failed") {
-      return { ...meta, state: "error", error: job.error, machineStatus };
+      return { ...meta, ...ports, state: "error", error: job.error, machineStatus };
     }
     const b = this.backendPods.find((p) => p.id === meta.id);
     const status = b?.status === "unknown" ? this.lastStatus.get(meta.id) : b?.status;
@@ -201,7 +325,7 @@ export class PodService {
       default:
         state = "stopped";
     }
-    return { ...meta, state, error, machineStatus };
+    return { ...meta, ...ports, state, error, machineStatus };
   }
 
   get(id: string): Pod {
@@ -231,12 +355,15 @@ export class PodService {
       repos,
       workspaceSha,
       createdAt: new Date().toISOString(),
+      ports: template.ports,
+      ignorePorts: template.ignorePorts,
     });
     await this.d.pods.put(meta);
     this.setOp(meta.id, { state: "creating" });
 
     const env: Record<string, string> = { PANEM_POD: JSON.stringify(meta) };
     if (this.d.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.d.claudeOauthToken;
+    if (this.d.relaySecret) env.PANEM_RELAY_SECRET = this.d.relaySecret;
     void this.d.backend
       .up({
         id: meta.id,
@@ -352,6 +479,16 @@ export class PodService {
   }
 
   private async forget(id: string) {
+    // Free the pod's port block on its machine (best effort: the machine may be gone).
+    const meta = this.d.pods.get(id) ?? this.podList().find((p) => p.id === id);
+    const machine = meta && this.machineCache.find((m) => m.name === meta.machine);
+    if (machine && this.d.forwarders?.enabled) {
+      await this.d.forwarders
+        .release(machine, id)
+        .catch((e) => this.log(`release ports of ${id}: ${msg(e)}`));
+      const st = this.fwd.get(machine.name)?.state;
+      if (st) st.pods = st.pods.filter((p) => p.id !== id);
+    }
     const job = this.d.jobs.forPod(id);
     if (job) await this.d.jobs.remove(job.id);
     await this.d.pods.remove(id);

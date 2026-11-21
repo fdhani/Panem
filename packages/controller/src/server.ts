@@ -2,10 +2,12 @@ import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
 import { type Config, type PodBackend, dataDir as defaultDataDir } from "@panem/core";
 import { createApp } from "./api";
+import { ForwarderManager, type Forwarders } from "./forwarders";
 import { WorkspaceRepo } from "./git";
-import { MockBackend } from "./mock-backend";
+import { MockBackend, MockForwarders } from "./mock-backend";
 import { type HostProbe, StaticProbe, TailscaleProbe, tailscaleIPv4 } from "./probe";
 import { PodService } from "./service";
+import { SshShell } from "./shell";
 import { JobStore, PodStore } from "./stores";
 import { Templates } from "./templates";
 import { loadUi } from "./ui";
@@ -15,6 +17,7 @@ export interface ControllerOptions {
   dataDir?: string;
   backend?: PodBackend;
   probe?: HostProbe;
+  forwarders?: Forwarders;
   log?: (msg: string) => void;
 }
 
@@ -24,6 +27,11 @@ export async function createController(o: ControllerOptions) {
   const backend =
     o.backend ?? (mock ? await seededMock() : new DevPodBackend({ bin: o.config.devpodPath }));
   const probe = o.probe ?? (mock ? new StaticProbe() : new TailscaleProbe());
+  const forwarders =
+    o.forwarders ??
+    (backend instanceof MockBackend
+      ? new MockForwarders(backend)
+      : new ForwarderManager(o.config, new SshShell()));
   const repo = new WorkspaceRepo(
     join(dir, "workspace"),
     o.config.workspaceRepoUrl,
@@ -38,6 +46,8 @@ export async function createController(o: ControllerOptions) {
     pods: await PodStore.open(dir),
     jobs: await JobStore.open(dir),
     claudeOauthToken: o.config.claudeOauthToken,
+    relaySecret: o.config.relaySecret,
+    forwarders,
     log: o.log,
   });
   const app = createApp({ service, templates, apiToken: o.config.apiToken, ui: await loadUi() });
@@ -63,6 +73,9 @@ export async function serve(config: Config) {
     }
   }
   await service.resumeJobs();
+  if (!config.relaySecret || !config.forwarderToken) {
+    console.warn("[panem] port forwarding off: run `panem init --force` to add its secrets");
+  }
   const poll = async () => {
     try {
       await service.refresh();
@@ -72,6 +85,12 @@ export async function serve(config: Config) {
   };
   await poll();
   const timer = setInterval(poll, 5000);
+  // Make sure every reachable machine runs the matching forwarder (idempotent).
+  if (config.relaySecret && config.forwarderToken) {
+    for (const m of service.machines().filter((x) => x.status !== "offline")) {
+      service.repairMachine(m.name, m).catch(() => {});
+    }
+  }
 
   // Only localhost and the Tailscale IP: never 0.0.0.0.
   const servers: ReturnType<typeof Bun.serve>[] = [];

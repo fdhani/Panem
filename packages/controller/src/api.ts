@@ -74,6 +74,10 @@ export function createApp(d: ApiDeps): Hono {
     return c.body(null, 204);
   });
 
+  app.post("/api/machines/:name/repair", async (c) =>
+    c.json(await service.repairMachine(c.req.param("name"))),
+  );
+
   app.get("/api/templates", async (c) => c.json(await d.templates.list()));
 
   app.get("/api/pods", (c) => c.json(service.podList()));

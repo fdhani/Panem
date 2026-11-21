@@ -5,3 +5,6 @@ export { StaticProbe, TailscaleProbe } from "./probe";
 export { createController, serve } from "./server";
 export { PodService, HttpError } from "./service";
 export { exportMemory, EXPORT_COMMAND } from "./exporter";
+export { ForwarderManager, type Forwarders } from "./forwarders";
+export { SshShell, type MachineShell } from "./shell";
+export { MockForwarders } from "./mock-backend";
