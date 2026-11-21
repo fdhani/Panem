@@ -1,7 +1,16 @@
 import type { Job, Pod } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ExternalLink, GitBranch, Play, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
+import {
+  ArrowUpRight,
+  ExternalLink,
+  GitBranch,
+  Play,
+  Plus,
+  RotateCcw,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 import { MachineDot, PodStateBadge } from "../components/status";
 import { Button } from "../components/ui/button";
@@ -113,6 +122,8 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         </ul>
       )}
 
+      {pod.exposed.length > 0 && <Services pod={pod} />}
+
       {pod.error && (
         <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">{pod.error}</p>
       )}
@@ -206,5 +217,69 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         </p>
       )}
     </Card>
+  );
+}
+
+function Services({ pod }: { pod: Pod }) {
+  const running = pod.state === "running";
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <p className="text-xs font-medium text-muted">Services</p>
+        {pod.indexUrl && running && (
+          <a
+            href={pod.indexUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-muted underline-offset-2 hover:text-text hover:underline"
+          >
+            All links
+          </a>
+        )}
+      </div>
+      <ul className="divide-y divide-border">
+        {pod.exposed.map((s) => {
+          const usable = running && s.live;
+          const label = (
+            <>
+              <span
+                className={`size-1.5 shrink-0 rounded-full ${usable ? "bg-ok" : "bg-muted/50"}`}
+                aria-hidden
+              />
+              <span className="min-w-0 flex-1 truncate">
+                <span className="font-medium">{s.name ?? `:${s.podPort}`}</span>
+                {s.name && <span className="text-muted"> :{s.podPort}</span>}
+              </span>
+              <span className="shrink-0 font-mono text-xs text-muted">
+                {s.url.replace(/^http:\/\//, "")}
+              </span>
+            </>
+          );
+          return (
+            <li key={s.hostPort}>
+              {usable ? (
+                <a
+                  href={s.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex min-h-11 items-center gap-2 px-3 text-sm hover:bg-surface-2"
+                >
+                  {label}
+                  <ArrowUpRight className="size-4 shrink-0 text-muted" />
+                </a>
+              ) : (
+                <div
+                  className="flex min-h-11 items-center gap-2 px-3 text-sm opacity-60"
+                  title="Not listening right now"
+                >
+                  {label}
+                  <span className="size-4 shrink-0" />
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }

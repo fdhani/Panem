@@ -2,17 +2,30 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { Machine, Pod } from "@panem/core";
-import { Config, configPath, loadConfig, saveConfig } from "@panem/core";
+import { Config, PANEM_VERSION, configPath, loadConfig, saveConfig } from "@panem/core";
 import { defineCommand, runMain } from "citty";
 import { client, table } from "./client";
 
-export const VERSION = "0.1.0";
+export const VERSION = PANEM_VERSION;
+
+const secret = () => randomBytes(24).toString("base64url");
 
 const serve = defineCommand({
   meta: { name: "serve", description: "Run the controller (API + web UI)" },
   async run() {
     const { serve } = await import("@panem/controller");
-    await serve(await loadConfig());
+    let cfg = await loadConfig();
+    // Configs from before port forwarding lack its secrets: add them once.
+    if (!cfg.relaySecret || !cfg.forwarderToken) {
+      cfg = {
+        ...cfg,
+        relaySecret: cfg.relaySecret ?? secret(),
+        forwarderToken: cfg.forwarderToken ?? secret(),
+      };
+      await saveConfig(cfg);
+      console.log("[panem] added port-forwarding secrets to the config");
+    }
+    await serve(cfg);
     await new Promise(() => {});
   },
 });
@@ -42,7 +55,9 @@ const init = defineCommand({
     const cfg = Config.parse({
       workspaceRepoUrl: args["workspace-repo"],
       workspaceBranch: args.branch,
-      apiToken: randomBytes(24).toString("base64url"),
+      apiToken: secret(),
+      relaySecret: secret(),
+      forwarderToken: secret(),
       claudeOauthToken: args["claude-token"] ?? process.env.CLAUDE_CODE_OAUTH_TOKEN,
       port: Number(args.port),
       devpodPath: args.devpod,
@@ -73,8 +88,15 @@ const machine = defineCommand({
         const ms = await (await client()).call<Machine[]>("GET", "/api/machines");
         console.log(
           table([
-            ["NAME", "HOST", "STATUS"],
-            ...ms.map((m) => [m.name, m.user ? `${m.user}@${m.host}` : m.host, m.status]),
+            ["NAME", "HOST", "STATUS", "FORWARDER"],
+            ...ms.map((m) => [
+              m.name,
+              m.user ? `${m.user}@${m.host}` : m.host,
+              m.status,
+              m.forwarder
+                ? `${m.forwarder.status}${m.forwarder.error ? `: ${m.forwarder.error}` : ""}`
+                : "-",
+            ]),
           ]),
         );
       },
@@ -91,6 +113,18 @@ const machine = defineCommand({
           user: args.user,
         });
         console.log(`added ${m.name} (${m.status})`);
+      },
+    }),
+    repair: defineCommand({
+      meta: { name: "repair", description: "Redeploy the machine's port forwarder" },
+      args: { name: { type: "positional", required: true } },
+      async run({ args }) {
+        const name = String(args.name);
+        const st = await (await client()).call<{ status: string }>(
+          "POST",
+          `/api/machines/${encodeURIComponent(name.startsWith("m-") ? name : `m-${name}`)}/repair`,
+        );
+        console.log(`forwarder ${st.status}`);
       },
     }),
     rm: defineCommand({
@@ -118,13 +152,17 @@ const pod = defineCommand({
         const ps = await (await client()).call<Pod[]>("GET", "/api/pods");
         console.log(
           table([
-            ["ID", "STATE", "MACHINE", "TEMPLATE", "REFS"],
+            ["ID", "STATE", "MACHINE", "TEMPLATE", "REFS", "PORTS"],
             ...ps.map((p) => [
               p.id,
               p.state,
               `${p.machine}${p.machineStatus === "offline" ? " (offline)" : ""}`,
               p.template,
               p.repos.map((r) => `${r.name}@${r.ref}`).join(" "),
+              p.exposed
+                .filter((x) => x.live)
+                .map((x) => `${x.podPort}->${x.url.replace(/^http:\/\//, "")}`)
+                .join(" "),
             ]),
           ]),
         );
