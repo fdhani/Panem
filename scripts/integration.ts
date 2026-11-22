@@ -74,12 +74,12 @@ writeFileSync(join(folder, "skills/review/SKILL.md"), "review\n");
 writeFileSync(join(folder, "notes.md"), "base\n");
 const panem = {
   sources: { overlay: { git: overlayOrigin, ref: "main" }, local: { dir: folder } },
+  // Copy-in only, except the preset's agent memory, which is saved back on delete.
   sync: [
-    { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md" },
-    { from: "memory/{repo}/**", to: "~/.claude/projects/-codebase-{repo}/memory/**", flow: "both" },
-    { source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**", flow: "both" },
+    { preset: "claude-code" },
+    { source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**" },
     { source: "local", from: "skills/**", to: "~/.claude/skills/**" },
-    { source: "local", from: "notes.md", to: "~/notes.md", flow: "both" },
+    { source: "local", from: "notes.md", to: "~/notes.md" },
   ],
 };
 writeFileSync(join(src, "panem.json"), JSON.stringify(panem));
@@ -181,7 +181,7 @@ try {
 
   step("copy-in from three sources, then the start hook");
   const synced = await syncIn({ backend: dp, sources }, meta);
-  meta = { ...meta, sync: synced.sync, workspaceSha: synced.workspaceSha };
+  meta = { ...meta, workspaceSha: synced.workspaceSha };
   console.log(`copied ${synced.files} file(s); notes: ${synced.notes.join(" | ") || "none"}`);
   await dp.runHook(id, "start");
   assert((await run("cat ~/.claude/CLAUDE.md")).out === "# integration", "CLAUDE.md");
@@ -245,24 +245,26 @@ try {
   const body = await (await fetch(`http://127.0.0.1:${hostPort}/`)).text();
   assert(body.includes("from-pod"), `proxied response (got ${JSON.stringify(body)})`);
 
-  step("export to all three sources");
+  step("save memory; nothing else is written back");
   await run(
     "mkdir -p /codebase/hello/specs && echo 'spec from pod' > /codebase/hello/specs/001.md",
   );
   await run("printf 'base\\npod\\n' > ~/notes.md");
-  const r = await exportPod({ backend: dp, sources }, meta);
-  console.log(`exported: ${r.files.join(", ")}`);
+  const r = await exportPod({ backend: dp, repo }, meta);
+  console.log(`saved: ${r.files.join(", ")}`);
   const exported = sh(root, `git --git-dir=${origin} show main:memory/hello/MEMORY.md`);
   assert(exported.includes("- learned in pod") && exported.includes("- seeded fact"), "merged");
   assert(
-    sh(root, `git --git-dir=${overlayOrigin} show main:hello/specs/001.md`).trim() ===
-      "spec from pod",
-    "overlay repo got the new spec",
+    Bun.spawnSync([
+      "git",
+      `--git-dir=${overlayOrigin}`,
+      "cat-file",
+      "-e",
+      "main:hello/specs/001.md",
+    ]).exitCode !== 0,
+    "overlay repo untouched (copy-in only)",
   );
-  assert(
-    sh(root, `cat ${join(folder, "notes.md")}`).includes("pod"),
-    "folder source got the notes",
-  );
+  assert(sh(root, `cat ${join(folder, "notes.md")}`) === "base\n", "folder source untouched");
 
   step("delete");
   await dp.delete(id);

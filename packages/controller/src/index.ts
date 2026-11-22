@@ -4,7 +4,7 @@ export { MockBackend } from "./mock-backend";
 export { StaticProbe, TailscaleProbe } from "./probe";
 export { createController, serve } from "./server";
 export { PodService, HttpError } from "./service";
-export { exportPod, exportCommand, ExportError, syncOf } from "./exporter";
+export { exportPod, exportCommand, hasMemory, syncOf } from "./exporter";
 export { syncIn } from "./sync-in";
 export { Sources, listFiles } from "./sources";
 export { ForwarderManager, type Forwarders } from "./forwarders";

@@ -116,9 +116,11 @@ Panem itself is agent-agnostic. Agents are devcontainer Features that a template
 
 ## Synced files (`panem.json`)
 
-What goes into a pod at create time, and what comes back on delete, is set by `panem.json` at the root of the workspace repo. Without it, the defaults apply (`[{ "preset": "claude-code" }]`), which are what Panem always did:
+`panem.json` at the root of the workspace repo decides which files are copied into a pod when it's created. **Sync is copy-in only.** The one exception is agent memory, which is saved back on delete.
+
+Without the file, the defaults apply (`[{ "preset": "claude-code" }]`), which are what Panem always did:
 - `CLAUDE.md`, `skills/`, `plans/`, `agents/` and `commands/` are copied into `~/.claude/`.
-- `memory/<repo>/` is copied in to Claude's memory folder for that repo, and merged back on delete.
+- `memory/<repo>/` is copied into Claude's memory folder for that repo, and saved back on delete.
 
 ```json
 {
@@ -127,9 +129,8 @@ What goes into a pod at create time, and what comes back on delete, is set by `p
     "local":   { "dir": "~/claude-context" }
   },
   "sync": [
-    { "from": "CLAUDE.md", "to": "~/.claude/CLAUDE.md" },
-    { "from": "memory/{repo}/**", "to": "~/.claude/projects/-codebase-{repo}/memory/**", "flow": "both" },
-    { "source": "overlay", "from": "{repo}/**", "to": "/codebase/{repo}/**", "flow": "both" },
+    { "preset": "claude-code" },
+    { "source": "overlay", "from": "{repo}/**", "to": "/codebase/{repo}/**" },
     { "source": "local", "from": "skills/**", "to": "~/.claude/skills/**" }
   ],
   "exclude": ["**/.DS_Store"]
@@ -138,16 +139,16 @@ What goes into a pod at create time, and what comes back on delete, is set by `p
 
 **Sources** are where files come from:
 - **The workspace repo:** any rule without `source`.
-- **Other git repos** (`git` + `ref`): the controller clones and pulls them itself. An empty repo is fine; the first export gives it its first commit.
+- **Other git repos** (`git` + `ref`): the controller clones and pulls them itself. An empty repo is fine.
 - **Folders on the controller host** (`dir`).
 
 **Rules:**
 - `from` is a path in the source, `to` a path in the pod. Each is either one file, or a folder ending in `/**` whose contents are carried over.
 - `{repo}` repeats the rule for each of the pod's repos.
-- `flow`: `in` (copied in at create, the default), `out` (only collected on delete), or `both`.
-- `merge` (for `out`/`both`): `union` (the default; keeps every line either side added) or `pod` (the pod's version wins where both changed).
 - `include` narrows a folder rule (e.g. `"**/*.md"`). `exclude`, global or per rule, drops files; both are globs (`**`, `*`, `?`).
+- `{ "preset": "<agent>" }` stands for an agent's rules, including its memory.
 - A template's own `sync` (in `template.json`) replaces the list for its pods, and its `syncExclude` adds excludes.
+- Rules have no `flow` or `merge`. Writing either is an error that explains copy-in only.
 
 **Where files can go in the pod:**
 - **`~/...`** is your personal setup.
@@ -156,20 +157,16 @@ What goes into a pod at create time, and what comes back on delete, is set by `p
 **Checked when the rules load** (a bad rule shows as a template error and blocks summon):
 - No `..` and nothing inside `.git`.
 - Nothing may write into `~/.panem` or `~/.config/panem`.
-- Rules that write back may not cover the workspace repo's `panem.json`, `.gitattributes` or `templates/`.
 
-**On delete**, a queued job runs, one at a time:
+**On delete**, agent memory is saved, one pod at a time:
 1. Start the pod if it's stopped.
-2. Collect the files of every `out`/`both` rule. For overlays, that's new untracked files that aren't gitignored, plus the overlaid files; never tracked ones, and never `node_modules`-style ignored files. The limit is 50 MB packed and 5,000 files.
-3. Merge each file three ways, against what the pod was sent: the commit for git sources, a snapshot for folders.
-   - Text: `git merge-file` (union or pod wins).
-   - Binary files: taken only if the source didn't change meanwhile.
-   - Deletions never propagate.
-4. Commit and push each git source (retrying on push races), and write folder sources in place. The pod is deleted only after every source succeeded.
+2. Collect the agent's memory folders, within a limit of 50 MB packed and 5,000 files.
+3. Merge each file three ways against the commit the pod was given, keeping every line either side added. A binary file is taken only if the repo's copy didn't change. Deletions never propagate.
+4. Commit and push to the workspace repo (retrying on push races). Only then is the pod deleted.
 
-If a source fails, the pod stays in `error` with **Retry export**, which redoes only the sources that didn't finish. If the machine is offline, delete is blocked; **Force delete** discards the pod's changes.
+If saving fails, the pod stays in `error` with **Retry**. Saving always uses the rules the pod was created with, even if `panem.json` changed since. Pods from before this export memory with the defaults, including pre-rename `-workspace-<repo>` folders.
 
-Export always uses the rules the pod was created with, even if `panem.json` changed since. Pods created before this feature export memory with the defaults, including pre-rename `-workspace-<repo>` folders.
+Nothing else comes back. Work worth keeping in an overlay (e.g. new specs) is pushed by the pod itself, from a before-destroy hook (see below), or committed to the code repo.
 
 ## Development
 

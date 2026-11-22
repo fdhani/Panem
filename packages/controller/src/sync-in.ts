@@ -1,14 +1,7 @@
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  type PodBackend,
-  type PodMeta,
-  type ResolvedSync,
-  WORKSPACE_SOURCE,
-  expandRules,
-  mapIn,
-} from "@panem/core";
+import { type PodBackend, type PodMeta, WORKSPACE_SOURCE, expandRules, mapIn } from "@panem/core";
 import { APPLY_SYNC_SCRIPT, bashCommand } from "./pod/scripts";
 import { type Sources, listFiles } from "./sources";
 
@@ -20,9 +13,7 @@ export function stagePath(podPath: string): string {
 }
 
 export interface SyncInResult {
-  /** The pod's sync with merge bases filled in. */
-  sync: ResolvedSync;
-  /** The workspace repo commit that was sent (becomes the pod's workspaceSha). */
+  /** The workspace repo commit that was sent (the pod's workspaceSha: memory's merge base). */
   workspaceSha: string;
   files: number;
   /** Warnings from the pod (e.g. overlay files skipped because the repo tracks them). */
@@ -30,8 +21,8 @@ export interface SyncInResult {
 }
 
 /**
- * Copy a pod's in-flowing files from every source into the pod, in one upload, and record
- * what was sent per source (git commit, or a snapshot for folders) as the export merge base.
+ * Copy a pod's synced files from every source into the pod, in one upload, and record which
+ * workspace-repo commit was sent (memory's merge base when it's saved back on delete).
  * Runs after the pod's one-time setup and before its start hook launches the agent.
  */
 export async function syncIn(
@@ -46,7 +37,7 @@ export async function syncIn(
   );
   const names = [...new Set(rules.map((r) => r.source))];
   const stage = await mkdtemp(join(tmpdir(), "panem-sync-in-"));
-  const bases: ResolvedSync["bases"] = {};
+  let workspaceSha = pod.workspaceSha;
   let files = 0;
   try {
     for (const name of names) {
@@ -61,26 +52,16 @@ export async function syncIn(
           await copyFile(join(co.root, m.src), dest);
           files++;
         }
-        if (co.commit !== undefined) {
-          bases[name] = { commit: co.commit };
-        } else {
-          // A folder has no history: keep what this pod could see as its merge base.
-          const asIn = rules.map((r) => ({ ...r, flow: "in" as const }));
-          const seen = [...new Set(mapIn(asIn, name, all, sync.exclude).map((m) => m.src))];
-          bases[name] = { snapshot: await d.sources.saveSnapshot(pod.id, name, co.root, seen) };
-        }
+        if (name === WORKSPACE_SOURCE && co.commit) workspaceSha = co.commit;
       } finally {
         await co.done();
       }
     }
 
-    const done: ResolvedSync = { ...sync, bases };
-    const workspaceSha =
-      (bases[WORKSPACE_SOURCE] as { commit?: string } | undefined)?.commit ?? pod.workspaceSha;
     // Refresh the pod's own copy of its metadata (used by `panem rediscover`).
     const podJson = join(stage, "home/.panem/pod.json");
     await mkdir(dirname(podJson), { recursive: true });
-    await writeFile(podJson, `${JSON.stringify({ ...pod, sync: done, workspaceSha }, null, 2)}\n`);
+    await writeFile(podJson, `${JSON.stringify({ ...pod, workspaceSha }, null, 2)}\n`);
 
     const tar = Bun.spawn(["tar", "-czf", "-", "-C", stage, "."], {
       stdout: "pipe",
@@ -104,7 +85,7 @@ export async function syncIn(
         `copying synced files into the pod failed: ${r.stderr.trim().split("\n").at(-1)}`,
       );
     }
-    return { sync: done, workspaceSha, files, notes };
+    return { workspaceSha, files, notes };
   } finally {
     await rm(stage, { recursive: true, force: true });
   }

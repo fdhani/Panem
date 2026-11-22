@@ -9,6 +9,7 @@ import {
   mapIn,
   mapOut,
   resolveSync,
+  validateRule,
 } from "../src";
 
 const tpl = { name: "shop" };
@@ -39,13 +40,14 @@ describe("resolveSync", () => {
     const r = resolve(undefined);
     expect(r.rules).toHaveLength(DEFAULT_RULES.length);
     expect(r.rules.every((x) => x.source === "workspace")).toBe(true);
-    expect(r.rules.map((x) => [x.from, x.flow])).toEqual([
-      ["CLAUDE.md", "in"],
-      ["skills/**", "in"],
-      ["plans/**", "in"],
-      ["agents/**", "in"],
-      ["commands/**", "in"],
-      ["memory/{repo}/**", "both"],
+    // Only the preset's memory rule is saved back on delete.
+    expect(r.rules.map((x) => [x.from, x.memory === true])).toEqual([
+      ["CLAUDE.md", false],
+      ["skills/**", false],
+      ["plans/**", false],
+      ["agents/**", false],
+      ["commands/**", false],
+      ["memory/{repo}/**", true],
     ]);
     // panem.json with sources but no sync also keeps the defaults.
     expect(resolve({ exclude: ["**/.DS_Store"] }).rules).toHaveLength(DEFAULT_RULES.length);
@@ -63,12 +65,13 @@ describe("resolveSync", () => {
     expect(r.exclude).toEqual(["**/.DS_Store", "**/*.tmp"]);
   });
 
-  test("defaults fill flow and merge; sources are kept", () => {
+  test("rules are copy-in; sources are kept", () => {
     const r = resolve({
       sources: { overlay: { git: "git@x:me/o.git" }, local: { dir: "~/ctx" } },
-      sync: [{ source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**", flow: "both" }],
+      sync: [{ source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**" }],
     });
-    expect(r.rules[0]).toMatchObject({ source: "overlay", merge: "union", flow: "both" });
+    expect(r.rules[0]).toMatchObject({ source: "overlay", from: "{repo}/**" });
+    expect(r.rules[0]!.memory).toBeUndefined();
     expect(r.sources.overlay).toEqual({ git: "git@x:me/o.git", ref: "main" });
     expect(r.sources.local).toEqual({ dir: "~/ctx" });
   });
@@ -92,24 +95,21 @@ describe("resolveSync", () => {
     rejects({ from: "x", to: "~/.config/panem/env" }, /Panem's own files/);
     rejects({ from: "x/**", to: "~/.config/**" }, /Panem's own files/);
     rejects({ source: "nope", from: "x", to: "~/x" }, /unknown source "nope"/);
-    rejects({ from: "x", to: "~/x", flow: "sideways" }, /flow/);
     rejects({ from: "x", to: "~/x", typo: 1 }, /Unrecognized key/);
   });
 
-  test("write-back rules can't touch the workspace repo's own config", () => {
-    rejects({ from: "panem.json", to: "~/p.json", flow: "both" }, /may not cover panem\.json/);
-    rejects({ from: ".gitattributes", to: "~/g", flow: "out" }, /may not cover/);
-    rejects({ from: "templates/**", to: "~/t/**", flow: "out" }, /may not cover/);
-    rejects({ from: "templates/x/**", to: "~/t/**", flow: "both" }, /may not cover/);
-    rejects({ from: "**", to: "~/everything/**", flow: "both" }, /may not cover/);
-    // Copy-in only is fine, and so is the same path in another source.
-    expect(rule({ from: "templates/**", to: "~/t/**", flow: "in" }).rules).toHaveLength(1);
-    expect(
-      resolve({
-        sources: { o: { git: "x" } },
-        sync: [{ source: "o", from: "**", to: "~/o/**", flow: "both" }],
-      }).rules,
-    ).toHaveLength(1);
+  test("rules are copy-in only: flow, merge and memory are refused with an explanation", () => {
+    rejects({ from: "notes/**", to: "~/notes/**", flow: "both" }, /copy-in only.*preset/);
+    rejects({ from: "notes/**", to: "~/notes/**", merge: "union" }, /copy-in only/);
+    rejects({ from: "notes/**", to: "~/notes/**", flow: "in" }, /copy-in only/);
+    rejects(
+      { from: "m/{repo}/**", to: "~/m/{repo}/**", memory: true },
+      /"memory" is set by agent presets/,
+    );
+    // Template rules get the same treatment.
+    expect(() => resolve({}, { sync: [{ from: "a", to: "~/a", flow: "out" }] })).toThrow(
+      /template shop sync\[0\]: sync rules are copy-in only/,
+    );
   });
 
   test("bad panem.json shapes are reported with their path", () => {
@@ -209,7 +209,7 @@ describe("mapping", () => {
     const r = resolve({
       sources: { overlay: { git: "x" } },
       sync: [
-        { source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**", flow: "both" },
+        { source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**" },
         { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md" },
       ],
     });
@@ -228,25 +228,56 @@ describe("mapping", () => {
     expect(mapIn(rs, "workspace", ["CLAUDE.md", "api/CLAUDE.md"], []).map((m) => m.dest)).toEqual([
       "~/.claude/CLAUDE.md",
     ]);
-    expect(mapOut(rs, ["/codebase/api/specs/001.md"], [])[0]).toMatchObject({
-      src: "api/specs/001.md",
-    });
-    expect(mapOut(rs, ["/codebase/api/specs/001.md"], [])[0]!.rule.source).toBe("overlay");
+    // Overlays are copy-in only: nothing in them is ever mapped back.
+    expect(mapOut(rs, ["/codebase/api/specs/001.md", "/codebase/api/CLAUDE.md"], [])).toEqual([]);
+    expect(exportRoots(rs)).toEqual([]);
   });
 
-  test("later rules win on the same destination; excludes also apply on export", () => {
+  test("later rules win on the same destination; only memory maps back, minus excludes", () => {
     const r = resolve({
       sync: [
         { from: "a.md", to: "~/x.md" },
         { from: "b.md", to: "~/x.md" },
-        { from: "notes/**", to: "~/notes/**", flow: "both", exclude: ["notes/private/**"] },
+        { from: "notes/**", to: "~/notes/**" },
+        { preset: "claude-code" },
       ],
+      exclude: ["memory/*/scratch/**"],
     });
-    const rs = expandRules(r.rules, []);
+    const rs = expandRules(r.rules, ["api"]);
     expect(mapIn(rs, "workspace", ["a.md", "b.md"], []).map((m) => m.src)).toEqual(["b.md"]);
-    expect(mapOut(rs, ["~/notes/ok.md", "~/notes/private/k.md"], []).map((m) => m.src)).toEqual([
-      "notes/ok.md",
-    ]);
+    expect(
+      mapOut(
+        rs,
+        [
+          "~/notes/ok.md",
+          "~/.claude/CLAUDE.md",
+          "~/.claude/projects/-codebase-api/memory/MEMORY.md",
+          "~/.claude/projects/-codebase-api/memory/scratch/tmp.md",
+        ],
+        r.exclude,
+      ).map((m) => m.src),
+    ).toEqual(["memory/api/MEMORY.md"]);
+  });
+
+  test("agent memory must come from the workspace repo and be a folder under ~/", () => {
+    const where = "test";
+    const base = {
+      source: "workspace",
+      from: "m/{repo}/**",
+      to: "~/m/{repo}/**",
+      exclude: [],
+      memory: true,
+    };
+    expect(() => validateRule(base, {}, where)).not.toThrow();
+    expect(() => validateRule({ ...base, source: "o" }, { o: {} }, where)).toThrow(
+      /workspace repo/,
+    );
+    expect(() => validateRule({ ...base, from: "m.md", to: "~/m.md" }, {}, where)).toThrow(
+      /folder under ~\//,
+    );
+    expect(() =>
+      validateRule({ ...base, from: "{repo}/**", to: "/codebase/{repo}/**" }, {}, where),
+    ).toThrow(/folder under ~\//);
   });
 
   test("legacy memory paths from before the rename", () => {

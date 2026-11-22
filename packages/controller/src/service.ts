@@ -24,7 +24,7 @@ import {
   resolveSync,
 } from "@panem/core";
 import { z } from "zod";
-import { ExportError, exportPod } from "./exporter";
+import { exportPod } from "./exporter";
 import type { Forwarders, MachineRef } from "./forwarders";
 import type { WorkspaceRepo } from "./git";
 import type { HostProbe } from "./probe";
@@ -513,7 +513,7 @@ export class PodService {
   private async syncIntoPod(meta: PodMeta): Promise<void> {
     const r = await syncIn({ backend: this.d.backend, sources: this.d.sources }, meta);
     const current = this.d.pods.get(meta.id) ?? meta;
-    await this.d.pods.put({ ...current, sync: r.sync, workspaceSha: r.workspaceSha });
+    await this.d.pods.put({ ...current, workspaceSha: r.workspaceSha });
     for (const n of r.notes) this.log(`${meta.id}: ${n}`);
     this.log(`synced ${r.files} file(s) into ${meta.id}`);
   }
@@ -580,7 +580,7 @@ export class PodService {
     if (pod.machineStatus === "offline") {
       throw new HttpError(
         409,
-        "machine is offline: memory can't be exported. Use force delete to discard it.",
+        "machine is offline, so memory can't be saved. Delete without saving to discard it.",
       );
     }
     const existing = this.d.jobs.forPod(id);
@@ -609,7 +609,6 @@ export class PodService {
   }
 
   private async forget(id: string) {
-    await this.d.sources.removeSnapshots(id).catch(() => {});
     // Free the pod's port block on its machine (best effort: the machine may be gone).
     const meta = this.d.pods.get(id) ?? this.podList().find((p) => p.id === id);
     const machine = meta && this.machineCache.find((m) => m.name === meta.machine);
@@ -667,21 +666,13 @@ export class PodService {
           await this.d.backend.start(meta.id);
         }
         this.setOp(meta.id, { state: "exporting" });
-        try {
-          const r = await exportPod({ backend: this.d.backend, sources: this.d.sources }, meta, {
-            done: job.exported,
-            onSourceDone: (name) => update({ exported: [...(job?.exported ?? []), name] }),
-          });
-          for (const n of r.notes) this.log(`${meta.id}: ${n}`);
-          this.log(
-            r.files.length
-              ? `exported ${r.files.length} file(s) from ${meta.id}: ${r.files.join(", ")}`
-              : `nothing to export from ${meta.id}`,
-          );
-        } catch (e) {
-          if (e instanceof ExportError) await update({ exported: e.done });
-          throw e;
-        }
+        const r = await exportPod({ backend: this.d.backend, repo: this.d.repo }, meta);
+        for (const n of r.notes) this.log(`${meta.id}: ${n}`);
+        this.log(
+          r.files.length
+            ? `saved ${r.files.length} memory file(s) from ${meta.id} (${r.commit?.slice(0, 8)})`
+            : `no memory changes in ${meta.id}`,
+        );
       }
       this.setOp(job.podId, { state: "deleting" });
       await this.d.backend.delete(job.podId);

@@ -7,7 +7,6 @@ import {
   type PodBackend,
   type PodMeta,
   type ResolvedSync,
-  WORKSPACE_SOURCE,
   expandRules,
   exportRoots,
   legacyPodPath,
@@ -17,17 +16,16 @@ import {
 import { type WorkspaceRepo, git } from "./git";
 import { mergeFile } from "./merge";
 import { EXPORT_SCRIPT, bashCommand } from "./pod/scripts";
-import { type Sources, listFiles } from "./sources";
+import { listFiles } from "./sources";
 
-/** Export limits: a stray rule (say, a node_modules folder) fails clearly instead of stalling. */
+/** Export limits: memory is small; anything bigger is a mistake worth a clear error. */
 export const EXPORT_MAX_BYTES = 50 * 1024 * 1024;
 export const EXPORT_MAX_FILES = 5000;
 
-/** Pod root ("~/x" or "/codebase/r/x") as an export.sh argument ("h:x" / "c:r/x"). */
+/** Pod root ("~/x") as an export.sh argument ("h:x"). */
 export function exportArg(root: string): string {
   if (root.startsWith("~/")) return `h:${root.slice(2)}`;
-  if (root.startsWith("/codebase/")) return `c:${root.slice("/codebase/".length)}`;
-  throw new Error(`unexpected pod path ${root}`);
+  throw new Error(`agent memory must be under ~/: ${root}`);
 }
 
 export function exportCommand(
@@ -41,11 +39,14 @@ export function exportCommand(
   ]);
 }
 
-/** Sync of a pod created before sync rules existed: the defaults, based on workspaceSha. */
+/** Sync of a pod created before sync rules existed: the defaults. */
 export function syncOf(pod: PodMeta): ResolvedSync {
-  if (pod.sync) return pod.sync;
-  const s = resolveSync(undefined, { name: pod.template });
-  return { ...s, bases: { [WORKSPACE_SOURCE]: { commit: pod.workspaceSha } } };
+  return pod.sync ?? resolveSync(undefined, { name: pod.template });
+}
+
+/** Whether deleting this pod saves anything (it has agent memory to save). */
+export function hasMemory(pod: PodMeta): boolean {
+  return syncOf(pod).rules.some((r) => r.memory);
 }
 
 /** "~/.claude/projects/-workspace-api/..." (pods from before the rename) -> "-codebase-api". */
@@ -53,29 +54,12 @@ function fromLegacy(p: string): string {
   return p.replace(/^~\/\.claude\/projects\/-workspace-/, "~/.claude/projects/-codebase-");
 }
 
-export interface SourceExport {
-  /** Files changed in the source, relative to its root. */
+export interface ExportResult {
+  /** Memory files changed in the workspace repo, relative to its root. */
   files: string[];
   commit?: string;
-}
-
-export interface ExportResult {
-  sources: Record<string, SourceExport>;
-  /** Files whose pod version wasn't used (e.g. binary changed on both sides). */
+  /** Files whose pod version wasn't used (binary changed on both sides). */
   notes: string[];
-  /** Every file written, as "<path>" (workspace repo) or "<source>:<path>". */
-  files: string[];
-}
-
-export class ExportError extends Error {
-  constructor(
-    message: string,
-    /** Sources that finished before or despite the failure (skip them on retry). */
-    readonly done: string[],
-  ) {
-    super(message);
-    this.name = "ExportError";
-  }
 }
 
 interface PodFile extends Mapping {
@@ -84,21 +68,14 @@ interface PodFile extends Mapping {
 }
 
 /**
- * Pull every write-back file out of the pod and merge it into its source: commit and push for
- * git sources (retrying push races), write into the folder for dir sources. Sources listed in
- * `opts.done` are skipped (a retry after a partial failure). Throws ExportError if any source
- * failed, after trying all of them.
+ * Save the pod's agent memory into the workspace repo: union-merge each file against the
+ * commit the pod was given, then commit and push (retrying push races). Nothing else is ever
+ * written back; work other than memory is pushed by the pod's before-destroy hooks.
  */
 export async function exportPod(
-  d: { backend: PodBackend; sources: Sources },
+  d: { backend: PodBackend; repo: WorkspaceRepo },
   pod: PodMeta,
-  opts: {
-    done?: string[];
-    onSourceDone?: (name: string) => Promise<void> | void;
-    attempts?: number;
-    maxBytes?: number;
-    maxFiles?: number;
-  } = {},
+  opts: { attempts?: number; maxBytes?: number; maxFiles?: number } = {},
 ): Promise<ExportResult> {
   const sync = syncOf(pod);
   const rules = expandRules(
@@ -106,8 +83,7 @@ export async function exportPod(
     pod.repos.map((r) => r.name),
   );
   const roots = exportRoots(rules);
-  const result: ExportResult = { sources: {}, notes: [], files: [] };
-  if (roots.length === 0) return result;
+  if (roots.length === 0) return { files: [], notes: [] };
   const withLegacy = [
     ...roots,
     ...roots.map(legacyPodPath).filter((x): x is string => x !== undefined),
@@ -115,8 +91,7 @@ export async function exportPod(
 
   const res = await d.backend.exec(pod.id, exportCommand(withLegacy, opts));
   if (res.exitCode !== 0) {
-    const last = res.stderr.trim().split("\n").at(-1) ?? "";
-    throw new ExportError(`reading files from the pod failed: ${last}`, opts.done ?? []);
+    throw new Error(`reading memory from the pod failed: ${res.stderr.trim().split("\n").at(-1)}`);
   }
   const tmp = await mkdtemp(join(tmpdir(), "panem-export-"));
   try {
@@ -126,164 +101,87 @@ export async function exportPod(
       ...m,
       local: byPath.get(m.dest)!,
     }));
+    if (mapped.length === 0) return { files: [], notes: [] };
 
-    const bySource = new Map<string, PodFile[]>();
-    for (const m of mapped) {
-      bySource.set(m.rule.source, [...(bySource.get(m.rule.source) ?? []), m]);
-    }
-
-    const done = [...(opts.done ?? [])];
-    const failed: string[] = [];
-    for (const [name, list] of bySource) {
-      if (done.includes(name)) continue;
+    let lastErr: unknown;
+    for (let i = 0; i < (opts.attempts ?? 3); i++) {
       try {
-        const r = await exportSource(
-          d.sources,
-          pod,
-          sync,
-          name,
-          list,
-          result.notes,
-          opts.attempts ?? 3,
-        );
-        result.sources[name] = r;
-        result.files.push(...r.files.map((f) => (name === WORKSPACE_SOURCE ? f : `${name}:${f}`)));
-        done.push(name);
-        await opts.onSourceDone?.(name);
+        return await d.repo.lock.run(() => applyAndPush(d.repo, pod, mapped));
       } catch (e) {
-        failed.push(`${name}: ${e instanceof Error ? e.message : e}`);
+        lastErr = e;
+        if (!isPushRace(e)) break;
       }
     }
-    if (failed.length) throw new ExportError(`export failed for ${failed.join("; ")}`, done);
-    return result;
+    throw lastErr;
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
 }
 
-/** Decode export.sh output into pod paths ("~/..." / "/codebase/...") and local copies. */
+/** Decode export.sh output ($HOME line, code-root line, base64 tar) into pod paths. */
 async function unpack(out: string, dir: string): Promise<{ podPath: string; local: string }[]> {
-  const [home, code, b64 = ""] = out.split("\n");
+  const [home, , b64 = ""] = out.split("\n");
   const data = b64.trim();
-  if (!home || !code || !data) return [];
+  if (!home || !data) return [];
   const tgz = join(dir, "export.tgz");
   await writeFile(tgz, Buffer.from(data, "base64"));
   const x = join(dir, "x");
   await mkdir(x);
   const p = Bun.spawn(["tar", "-xzf", tgz, "-C", x], { stderr: "pipe" });
   if ((await p.exited) !== 0) {
-    throw new Error(`could not unpack files from the pod: ${await new Response(p.stderr).text()}`);
+    throw new Error(`could not unpack memory from the pod: ${await new Response(p.stderr).text()}`);
   }
   const files: { podPath: string; local: string }[] = [];
   for (const rel of await listFiles(x)) {
     const abs = `/${rel}`;
-    let podPath: string | undefined;
-    if (abs.startsWith(`${home}/`)) podPath = `~/${abs.slice(home.length + 1)}`;
-    else if (abs.startsWith(`${code}/`)) podPath = `/codebase/${abs.slice(code.length + 1)}`;
-    if (podPath) files.push({ podPath, local: join(x, rel) });
+    if (abs.startsWith(`${home}/`)) {
+      files.push({ podPath: `~/${abs.slice(home.length + 1)}`, local: join(x, rel) });
+    }
   }
   return files;
 }
 
-/** Keep writes inside the source's root, whatever a path says. */
+/** Keep writes inside the repo, whatever a path says. */
 function inside(root: string, rel: string): string {
   const base = resolve(root);
   const p = resolve(base, rel);
-  if (!p.startsWith(base + sep)) throw new Error(`path escapes the source: ${rel}`);
+  if (!p.startsWith(base + sep)) throw new Error(`path escapes the workspace repo: ${rel}`);
   return p;
-}
-
-async function exportSource(
-  sources: Sources,
-  pod: PodMeta,
-  sync: ResolvedSync,
-  name: string,
-  files: PodFile[],
-  notes: string[],
-  attempts: number,
-): Promise<SourceExport> {
-  const spec = name === WORKSPACE_SOURCE ? undefined : sync.sources[name];
-  if (name !== WORKSPACE_SOURCE && !spec) throw new Error(`unknown source "${name}"`);
-  const base = sync.bases[name];
-  const repo = sources.repo(name, spec);
-
-  if (!repo) {
-    // Folder source: merge against the snapshot of what the pod was sent.
-    const root = sources.dir(spec as { dir: string });
-    const snap = await sources.snapshotReader(base && "snapshot" in base ? base.snapshot : "");
-    try {
-      const changed: string[] = [];
-      for (const f of files) {
-        const dest = inside(root, f.src);
-        const current = existsSync(dest) ? await readBytes(dest) : undefined;
-        const out = await mergeFile(
-          current,
-          await snap.read(f.src),
-          await readBytes(f.local),
-          f.rule.merge,
-        );
-        if (out.note) notes.push(`${name}:${f.src}: ${out.note}`);
-        if (out.content) {
-          await mkdir(dirname(dest), { recursive: true });
-          await writeFile(dest, out.content);
-          changed.push(f.src);
-        }
-      }
-      return { files: changed };
-    } finally {
-      await snap.done();
-    }
-  }
-
-  const commit =
-    base && "commit" in base ? base.commit : name === WORKSPACE_SOURCE ? pod.workspaceSha : "";
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await repo.lock.run(() => applyAndPush(repo, pod, commit, files, notes, name));
-    } catch (e) {
-      lastErr = e;
-      if (!isPushRace(e)) break;
-    }
-  }
-  throw lastErr;
 }
 
 async function applyAndPush(
   repo: WorkspaceRepo,
   pod: PodMeta,
-  baseCommit: string,
   files: PodFile[],
-  notes: string[],
-  name: string,
-): Promise<SourceExport> {
+): Promise<ExportResult> {
   await repo.syncUnlocked();
   const changed: string[] = [];
+  const notes: string[] = [];
   for (const f of files) {
     const dest = inside(repo.dir, f.src);
     if (relative(repo.dir, dest).split(sep)[0] === ".git") continue;
     const current = existsSync(dest) ? await readBytes(dest) : undefined;
-    const base = await repo.showBytes(baseCommit, f.src);
-    const out = await mergeFile(current, base, await readBytes(f.local), f.rule.merge);
-    if (out.note) notes.push(`${name === WORKSPACE_SOURCE ? "" : `${name}:`}${f.src}: ${out.note}`);
+    const base = await repo.showBytes(pod.workspaceSha, f.src);
+    const out = await mergeFile(current, base, await readBytes(f.local));
+    if (out.note) notes.push(`${f.src}: ${out.note}`);
     if (out.content) {
       await mkdir(dirname(dest), { recursive: true });
       await writeFile(dest, out.content);
       changed.push(f.src);
     }
   }
-  if (changed.length === 0) return { files: [] };
+  if (changed.length === 0) return { files: [], notes };
   await git(repo.dir, ["add", "--", ...changed]);
   await git(repo.dir, [
     "commit",
     "--quiet",
     "-m",
-    `panem: export from ${pod.id}`,
+    `panem: save memory from ${pod.id}`,
     "-m",
     `Template: ${pod.template}\nMachine: ${pod.machine}\nRefs: ${pod.repos.map((r) => `${r.name}@${r.ref}`).join(", ")}`,
   ]);
   await git(repo.dir, ["push", "--quiet", "origin", `HEAD:${repo.branch}`]);
-  return { files: changed, commit: await repo.headUnlocked() };
+  return { files: changed, commit: await repo.headUnlocked(), notes };
 }
 
 async function readBytes(p: string): Promise<Uint8Array> {

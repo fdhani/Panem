@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Pod } from "@panem/core";
 import { makeController, makeRepo, makeWorkspace, sh, until } from "./helpers";
@@ -14,7 +14,7 @@ async function summon(ctl: Ctl, template = "shop"): Promise<Pod> {
   return ctl.service.get(pod.id);
 }
 
-/** Workspace with a panem.json using all three source kinds. */
+/** Workspace with a panem.json using all three source kinds (copy-in) plus the Claude preset. */
 function setup() {
   const ws = makeWorkspace();
   const overlay = makeRepo(ws.root, "overlay", {
@@ -31,15 +31,10 @@ function setup() {
     JSON.stringify({
       sources: { overlay: { git: overlay.origin, ref: "main" }, local: { dir: folder } },
       sync: [
-        { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md" },
-        {
-          from: "memory/{repo}/**",
-          to: "~/.claude/projects/-codebase-{repo}/memory/**",
-          flow: "both",
-        },
-        { source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**", flow: "both" },
+        { preset: "claude-code" },
+        { source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**" },
         { source: "local", from: "skills/**", to: "~/.claude/skills/**" },
-        { source: "local", from: "notes.md", to: "~/notes.md", flow: "both" },
+        { source: "local", from: "notes.md", to: "~/notes.md" },
       ],
       exclude: ["**/.DS_Store"],
     }),
@@ -65,9 +60,8 @@ describe("copy-in", () => {
     // The merge base is the commit that was actually sent, and the pod's pod.json knows it.
     const head = sh(ws.root, `git --git-dir=${ws.origin} rev-parse main`).trim();
     expect(pod.workspaceSha).toBe(head);
-    expect(pod.sync?.bases.workspace).toEqual({ commit: head });
     const podJson = JSON.parse(ctl.backend.readPodFile(pod.id, "~/.panem/pod.json")!);
-    expect(podJson.sync.bases.workspace.commit).toBe(head);
+    expect(podJson.workspaceSha).toBe(head);
   });
 
   test("all three source kinds, with overlays hidden from git", async () => {
@@ -82,7 +76,6 @@ describe("copy-in", () => {
     expect(rd("~/notes.md")).toBe("base notes\n");
     const api = ctl.backend.localPath(pod.id, "/codebase/api");
     expect(sh(api, "git status --porcelain")).toBe("");
-    expect(Object.keys(pod.sync!.bases).sort()).toEqual(["local", "overlay", "workspace"]);
   });
 
   test("a failed copy-in leaves the pod in error and never starts the agent", async () => {
@@ -111,8 +104,28 @@ describe("copy-in", () => {
   });
 });
 
-describe("export", () => {
-  test("writes back to the workspace repo, the overlay repo and the folder", async () => {
+describe("an empty overlay repo is a valid source", () => {
+  test("summon works with nothing in it yet", async () => {
+    const ws = makeWorkspace();
+    const empty = makeRepo(ws.root, "fresh");
+    ws.pushFrom(
+      "cfg",
+      "panem.json",
+      JSON.stringify({
+        sources: { fresh: { git: empty.origin } },
+        sync: [
+          { preset: "claude-code" },
+          { source: "fresh", from: "{repo}/**", to: "/codebase/{repo}/**" },
+        ],
+      }),
+    );
+    const ctl = await makeController(ws);
+    expect((await summon(ctl)).state).toBe("running");
+  });
+});
+
+describe("delete saves agent memory, and only that", () => {
+  test("memory goes to the workspace repo; overlay, folder and copied files stay put", async () => {
     const { ws, overlay, folder } = setup();
     const ctl = await makeController(ws);
     const pod = await summon(ctl);
@@ -123,103 +136,71 @@ describe("export", () => {
       "# API memory\n- uses postgres\n- learned\n",
     );
     ctl.backend.writePodFile(pod.id, "/codebase/api/specs/001/spec.md", "new spec\n");
-    ctl.backend.writePodFile(
-      pod.id,
-      "/codebase/api/.specify/memory/constitution.md",
-      "be kind\nand brief\n",
-    );
+    ctl.backend.writePodFile(pod.id, "/codebase/api/.specify/memory/constitution.md", "edited\n");
     ctl.backend.writePodFile(pod.id, "~/notes.md", "base notes\npod notes\n");
-    ctl.backend.writePodFile(pod.id, "~/.claude/skills/review/SKILL.md", "edited (copy-in only)\n");
-    ctl.backend.writePodFile(pod.id, "/codebase/api/specs/.DS_Store", "junk");
-    // Meanwhile the folder changes on the controller host.
-    writeFileSync(join(folder, "notes.md"), "base notes\nhost notes\n");
+    ctl.backend.writePodFile(pod.id, "~/.claude/skills/review/SKILL.md", "edited\n");
+    ctl.backend.writePodFile(pod.id, "~/.claude/CLAUDE.md", "edited\n");
+    const overlayLog = overlay.log();
 
     await ctl.req("DELETE", `/api/pods/${pod.id}`);
     await ctl.service.idle();
     expect(ctl.service.podList()).toEqual([]);
     expect(ws.read("memory/api/MEMORY.md")).toContain("- learned");
-    expect(overlay.read("api/specs/001/spec.md")).toBe("new spec\n");
-    expect(overlay.read("api/.specify/memory/constitution.md")).toBe("be kind\nand brief\n");
-    expect(() => overlay.read("api/specs/.DS_Store")).toThrow();
-    const notes = readFileSync(join(folder, "notes.md"), "utf8");
-    expect(notes).toContain("pod notes");
-    expect(notes).toContain("host notes");
-    // Copy-in-only files never come back.
+    expect(ws.log().split("\n")[0]).toBe(`panem: save memory from ${pod.id}`);
+    expect(ws.read("CLAUDE.md")).toBe("be nice\n");
+    expect(overlay.log()).toBe(overlayLog);
+    expect(() => overlay.read("api/specs/001/spec.md")).toThrow();
+    expect(overlay.read("api/.specify/memory/constitution.md")).toBe("be kind\n");
+    expect(readFileSync(join(folder, "notes.md"), "utf8")).toBe("base notes\n");
     expect(readFileSync(join(folder, "skills/review/SKILL.md"), "utf8")).toBe("review skill\n");
-    expect(overlay.log().split("\n")[0]).toBe(`panem: export from ${pod.id}`);
-    // The dir source's snapshot is cleaned up with the pod.
-    expect(existsSync(join(ctl.dataDir, "snapshots", pod.id))).toBe(false);
   });
 
-  test("an empty overlay repo gets its first commit from the pod", async () => {
+  test("a pod without agent memory saves nothing and just deletes", async () => {
     const ws = makeWorkspace();
-    const empty = makeRepo(ws.root, "fresh");
     ws.pushFrom(
       "cfg",
       "panem.json",
-      JSON.stringify({
-        sources: { fresh: { git: empty.origin } },
-        sync: [{ source: "fresh", from: "{repo}/**", to: "/codebase/{repo}/**", flow: "both" }],
-      }),
+      JSON.stringify({ sync: [{ from: "CLAUDE.md", to: "~/CLAUDE.md" }] }),
     );
     const ctl = await makeController(ws);
     const pod = await summon(ctl);
-    expect(pod.state).toBe("running");
-    expect(pod.sync?.bases.fresh).toEqual({ commit: "" });
-    ctl.backend.writePodFile(pod.id, "/codebase/web/specs/a.md", "first\n");
+    ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "not synced here\n");
+    const before = ws.log();
     await ctl.req("DELETE", `/api/pods/${pod.id}`);
     await ctl.service.idle();
     expect(ctl.service.podList()).toEqual([]);
-    expect(empty.read("web/specs/a.md")).toBe("first\n");
+    expect(ws.log()).toBe(before);
   });
 
   test("uses the rules the pod started with, even if panem.json changed since", async () => {
     const ws = makeWorkspace();
-    ws.pushFrom(
-      "cfg",
-      "panem.json",
-      JSON.stringify({ sync: [{ from: "notes/**", to: "~/notes/**", flow: "both" }] }),
-    );
     const ctl = await makeController(ws);
-    const pod = await summon(ctl);
-    ws.pushFrom("cfg2", "panem.json", JSON.stringify({ sync: [] }));
-    ctl.backend.writePodFile(pod.id, "~/notes/today.md", "kept\n");
+    const pod = await summon(ctl); // defaults: the Claude preset, with memory
+    ws.pushFrom("cfg", "panem.json", JSON.stringify({ sync: [] }));
+    ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "# API memory\n- uses postgres\n- kept\n");
     await ctl.req("DELETE", `/api/pods/${pod.id}`);
     await ctl.service.idle();
-    expect(ws.read("notes/today.md")).toBe("kept\n");
+    expect(ws.read("memory/api/MEMORY.md")).toContain("- kept");
   });
 
-  test("a failing source fails the job; retry exports only what's left", async () => {
-    const { ws, overlay } = setup();
+  test("a failing push keeps the pod in error; retry finishes it", async () => {
+    const ws = makeWorkspace();
     const ctl = await makeController(ws);
     const pod = await summon(ctl);
     ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "- from pod\n");
-    ctl.backend.writePodFile(pod.id, "/codebase/api/specs/x.md", "spec\n");
-    const hook = join(overlay.origin, "hooks/pre-receive");
-    writeFileSync(hook, "#!/bin/sh\necho 'overlay is read-only today' >&2\nexit 1\n", {
-      mode: 0o755,
-    });
+    const hook = join(ws.origin, "hooks/pre-receive");
+    writeFileSync(hook, "#!/bin/sh\necho 'read-only today' >&2\nexit 1\n", { mode: 0o755 });
 
     await ctl.req("DELETE", `/api/pods/${pod.id}`);
     await ctl.service.idle();
-    const failed = ctl.service.get(pod.id);
-    expect(failed.state).toBe("error");
-    expect(failed.error).toContain("overlay");
+    expect(ctl.service.get(pod.id).state).toBe("error");
     expect(ctl.backend.pods.has(pod.id)).toBe(true);
-    const job = (await (await ctl.req("GET", "/api/jobs")).json()) as {
-      jobs: { exported?: string[] }[];
-    };
-    // The folder and the workspace repo finished; only the overlay is left.
-    expect(job.jobs[0]!.exported?.sort()).toEqual(["local", "workspace"]);
-    const workspaceCommits = ws.log().split("\n").filter(Boolean).length;
 
     sh(ws.root, `rm ${hook}`);
     await ctl.req("POST", `/api/pods/${pod.id}/retry-export`);
     await ctl.service.idle();
     expect(ctl.service.podList()).toEqual([]);
-    expect(overlay.read("api/specs/x.md")).toBe("spec\n");
-    // The workspace repo wasn't exported twice.
-    expect(ws.log().split("\n").filter(Boolean).length).toBe(workspaceCommits);
+    expect(ws.read("memory/api/MEMORY.md")).toContain("- from pod");
   });
 
   test("pods from before sync rules export memory with the defaults, incl. -workspace- paths", async () => {

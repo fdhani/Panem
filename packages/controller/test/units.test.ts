@@ -21,19 +21,6 @@ describe("merge", () => {
     expect(m).not.toContain("<<<");
   });
 
-  test("pod mode prefers the pod's lines on conflict", async () => {
-    const r = await mergeFile(enc("x\nrepo\ny\n"), enc("x\nbase\ny\n"), enc("x\npod\ny\n"), "pod");
-    expect(dec(r.content)).toBe("x\npod\ny\n");
-    const u = await mergeFile(
-      enc("x\nrepo\ny\n"),
-      enc("x\nbase\ny\n"),
-      enc("x\npod\ny\n"),
-      "union",
-    );
-    expect(dec(u.content)).toContain("repo");
-    expect(dec(u.content)).toContain("pod");
-  });
-
   test("unchanged in the pod leaves the source alone, even if deleted there", async () => {
     expect(await mergeFile(enc("new\n"), enc("old\n"), enc("old\n"))).toEqual({});
     expect(await mergeFile(undefined, enc("old\n"), enc("old\n"))).toEqual({});
@@ -174,45 +161,26 @@ describe("export.sh (in-pod copy-out)", () => {
     return { home, code, list };
   };
 
-  test("collects home roots and overlay roots, skipping tracked and gitignored files", () => {
+  test("collects the memory folders it's given, and nothing else", () => {
     const pod = fakePod();
     pod.write(join(pod.home, ".claude/projects/-codebase-api/memory/MEMORY.md"), "fact\n");
     pod.write(join(pod.home, ".claude/projects/-codebase-api/session.jsonl"), "{}\n");
+    pod.write(join(pod.home, ".claude/skills/a/SKILL.md"), "copy-in only\n");
     const api = pod.repo("api");
-    pod.write(join(api, ".gitignore"), "node_modules/\n");
-    pod.write(join(api, "src/app.ts"), "tracked\n");
-    pod.git(api, `add -A && git -C '${api}' -c user.email=t@t -c user.name=t commit -qm init`);
-    pod.write(join(api, "specs/001/spec.md"), "new spec\n");
-    pod.write(join(api, "node_modules/x/index.js"), "dep\n");
-    // An overlaid file (hidden from git by .git/info/exclude), as apply-sync.sh leaves it.
-    pod.write(join(api, ".specify/c.md"), "overlay\n");
-    pod.write(join(api, ".git/info/exclude"), "/.specify/c.md\n");
-    pod.write(join(pod.home, ".panem/overlays/api.list"), ".specify/c.md\n");
+    pod.write(join(api, "specs/001/spec.md"), "overlay work: saved by a hook, not by export\n");
 
-    const r = pod.run(
-      exportCommand(["~/.claude/projects/-codebase-api/memory", "/codebase/api", "~/missing"]),
-    );
+    const r = pod.run(exportCommand(["~/.claude/projects/-codebase-api/memory", "~/missing"]));
     expect(r.exitCode).toBe(0);
     const { home, code, list } = decode(r.stdout);
     expect(home).toBe(pod.home);
     expect(code).toBe(pod.code);
-    const rel = list.map((f) => f.replace(pod.root, ""));
-    expect(rel.sort()).toEqual(
-      [
-        "/home/.claude/projects/-codebase-api/memory/MEMORY.md",
-        "/codebase/api/specs/001/spec.md",
-        "/codebase/api/.specify/c.md",
-      ].sort(),
-    );
+    expect(list.map((f) => f.replace(pod.root, ""))).toEqual([
+      "/home/.claude/projects/-codebase-api/memory/MEMORY.md",
+    ]);
   });
 
-  test("overlay sub-roots only collect their own folder", () => {
-    const pod = fakePod();
-    const api = pod.repo("api");
-    pod.write(join(api, "specs/a.md"), "a\n");
-    pod.write(join(api, "notes.md"), "n\n");
-    const r = pod.run(exportCommand(["/codebase/api/specs"]));
-    expect(decode(r.stdout).list.map((f) => f.replace(pod.code, ""))).toEqual(["/api/specs/a.md"]);
+  test("only home roots exist now: an overlay root is refused before reaching the pod", () => {
+    expect(() => exportCommand(["/codebase/api"])).toThrow(/under ~\//);
   });
 
   test("nothing to collect is an empty, successful export", () => {

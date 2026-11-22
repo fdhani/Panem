@@ -3,7 +3,9 @@ import { GitRef } from "./refs";
 
 /**
  * Sync rules: which files are copied from a source (the workspace repo, another git repo, or a
- * folder on the controller) into a pod at create time, and which come back out on delete.
+ * folder on the controller) into a pod at create time. Copy-in only: the one thing saved back
+ * on delete is agent memory (marked by the agent's preset), into the workspace repo. Anything
+ * else worth keeping is pushed by the pod itself from a before-destroy hook.
  *
  * Paths:
  * - `from` is relative to the source's root.
@@ -30,13 +32,15 @@ export const SyncSource = z.union([
 ]);
 export type SyncSource = z.infer<typeof SyncSource>;
 
+/**
+ * A sync rule: copy files from a source into the pod when it's created. Copy-in only; the one
+ * thing saved back on delete is agent memory, which only an agent's preset can declare.
+ */
 export const SyncRule = z
   .object({
     source: SourceName.optional(),
     from: z.string().min(1),
     to: z.string().min(1),
-    flow: z.enum(["in", "out", "both"]).default("in"),
-    merge: z.enum(["union", "pod"]).default("union"),
     /** Folder rules only: glob on the path below the folder, e.g. "**\/*.md". */
     include: z.string().min(1).optional(),
     /** Globs on the source-relative path. */
@@ -45,6 +49,10 @@ export const SyncRule = z
   .strict();
 export type SyncRule = z.infer<typeof SyncRule>;
 export type SyncRuleInput = z.input<typeof SyncRule>;
+
+/** A rule inside an agent preset: may mark agent memory, which is also saved back on delete. */
+export const PresetRule = SyncRule.extend({ memory: z.boolean().optional() });
+export type PresetRuleInput = z.input<typeof PresetRule>;
 
 /** `{ "preset": "<agent id>" }` in a sync list stands for that agent's rules. */
 export const PresetRef = z.object({ preset: z.string().min(1) }).strict();
@@ -65,15 +73,8 @@ export type PanemConfig = z.infer<typeof PanemConfig>;
 /** What a pod was created with; export always uses this, not the repo's current panem.json. */
 export const ResolvedSync = z.object({
   sources: z.record(z.string(), SyncSource),
-  rules: z.array(SyncRule.extend({ source: z.string() })),
+  rules: z.array(PresetRule.extend({ source: z.string() })),
   exclude: z.array(z.string()),
-  /** Per source: what was sent to the pod (the merge base on export). */
-  bases: z
-    .record(
-      z.string(),
-      z.union([z.object({ commit: z.string() }), z.object({ snapshot: z.string() })]),
-    )
-    .default({}),
 });
 export type ResolvedSync = z.infer<typeof ResolvedSync>;
 export type ResolvedRule = ResolvedSync["rules"][number];
@@ -82,17 +83,17 @@ export type ResolvedRule = ResolvedSync["rules"][number];
  * Sync rules per agent, so `{ "preset": "claude-code" }` can stand in for them. Plain data:
  * adding an agent (say codex: AGENTS.md -> ~/.codex/AGENTS.md) is one more entry here.
  */
-export const PRESETS: Record<string, SyncRuleInput[]> = {
+export const PRESETS: Record<string, PresetRuleInput[]> = {
   "claude-code": [
-    { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md", flow: "in" },
+    { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md" },
     ...["skills", "plans", "agents", "commands"].map(
-      (d): SyncRuleInput => ({ from: `${d}/**`, to: `~/.claude/${d}/**`, flow: "in" }),
+      (d): PresetRuleInput => ({ from: `${d}/**`, to: `~/.claude/${d}/**` }),
     ),
+    // Claude's per-repo memory: copied in, and saved back to the workspace repo on delete.
     {
       from: "memory/{repo}/**",
       to: "~/.claude/projects/-codebase-{repo}/memory/**",
-      flow: "both",
-      merge: "union",
+      memory: true,
     },
   ],
 };
@@ -100,7 +101,7 @@ export const PRESETS: Record<string, SyncRuleInput[]> = {
 /** Used when there is no panem.json (or it has no `sync`): Claude Code, as Panem always did. */
 export const DEFAULT_SYNC: SyncEntryInput[] = [{ preset: "claude-code" }];
 /** The default sync, expanded. */
-export const DEFAULT_RULES: SyncRuleInput[] = PRESETS["claude-code"]!;
+export const DEFAULT_RULES: PresetRuleInput[] = PRESETS["claude-code"]!;
 
 export class SyncConfigError extends Error {
   constructor(message: string) {
@@ -184,10 +185,6 @@ function checkPath(side: "from" | "to", p: string, where: string): void {
 
 /** Places a rule must never write in the pod: Panem's own state and secrets. */
 const PROTECTED_POD = ["~/.panem", "~/.config/panem"];
-/** Workspace-repo files a pod must never write back (they configure every pod). */
-const PROTECTED_REPO_FILES = ["panem.json", ".gitattributes"];
-const PROTECTED_REPO_DIRS = ["templates"];
-
 export function validateRule(
   r: ResolvedRule,
   sources: Record<string, unknown>,
@@ -239,19 +236,20 @@ export function validateRule(
     throw new SyncConfigError(`${where}: to "${r.to}" must start with ~/ or /codebase/{repo}/`);
   }
 
-  const writesBack = r.flow === "out" || r.flow === "both";
-  if (writesBack && r.source === WORKSPACE_SOURCE) {
-    const p = from.prefix;
-    const touches = (f: string) => (from.isDir ? p === "" || f.startsWith(`${p}/`) : f === p);
-    const touchesDir = (d: string) =>
-      p === "" || p === d || p.startsWith(`${d}/`) || (from.isDir && d.startsWith(`${p}/`));
-    if (PROTECTED_REPO_FILES.some(touches) || PROTECTED_REPO_DIRS.some(touchesDir)) {
-      throw new SyncConfigError(
-        `${where}: rules that write back may not cover panem.json, .gitattributes or templates/`,
-      );
+  // Memory is saved back on delete, and only ever into the workspace repo's memory.
+  if (r.memory) {
+    if (r.source !== WORKSPACE_SOURCE) {
+      throw new SyncConfigError(`${where}: agent memory must come from the workspace repo`);
+    }
+    if (!from.isDir || !r.to.startsWith(POD_HOME)) {
+      throw new SyncConfigError(`${where}: agent memory must be a folder under ~/`);
     }
   }
 }
+
+/** What a rule with keys from the old two-way sync gets told. */
+const COPY_IN_ONLY =
+  'sync rules are copy-in only; agent memory is saved back through the agent\'s preset (e.g. {"preset": "claude-code"})';
 
 /**
  * Rules for a pod: the template's `sync` replaces the root list; excludes add up.
@@ -287,7 +285,13 @@ export function resolveSync(
       list = preset.map((r, j) => ({ r, where: `${where} (preset ${ref.data.preset} rule ${j})` }));
     }
     for (const { r, where: w } of list) {
-      const p = SyncRule.safeParse(r);
+      if (!isPreset && typeof r === "object" && r !== null) {
+        if ("flow" in r || "merge" in r) throw new SyncConfigError(`${w}: ${COPY_IN_ONLY}`);
+        if ("memory" in r) {
+          throw new SyncConfigError(`${w}: "memory" is set by agent presets, not by rules`);
+        }
+      }
+      const p = (isPreset ? PresetRule : SyncRule).safeParse(r);
       if (!p.success) {
         const issue = p.error.issues[0]!;
         throw new SyncConfigError(`${w}: ${issue.path.join(".") || "rule"}: ${issue.message}`);
@@ -301,7 +305,6 @@ export function resolveSync(
     sources: cfg.sources,
     rules,
     exclude: [...cfg.exclude, ...(template.syncExclude ?? [])],
-    bases: {},
   };
 }
 
@@ -362,7 +365,7 @@ export function mapIn(
 ): Mapping[] {
   const byDest = new Map<string, Mapping>();
   for (const rule of rules) {
-    if (rule.source !== source || rule.flow === "out") continue;
+    if (rule.source !== source) continue;
     const from = shape(rule.from);
     const to = shape(rule.to);
     for (const f of files) {
@@ -380,14 +383,14 @@ export function mapIn(
   return [...byDest.values()];
 }
 
-/** Map pod files back to source paths, for rules that write back. First matching rule wins. */
+/** Map pod files back to workspace-repo paths, for agent memory. First matching rule wins. */
 export function mapOut(
   rules: ConcreteRule[],
   podFiles: string[],
   globalExclude: string[],
 ): Mapping[] {
   const out: Mapping[] = [];
-  const outRules = rules.filter((r) => r.flow !== "in");
+  const outRules = rules.filter((r) => r.memory);
   for (const f of podFiles) {
     if (segments(f).some((s) => s === ".." || s === ".")) continue;
     for (const rule of outRules) {
@@ -408,10 +411,10 @@ export function mapOut(
   return out;
 }
 
-/** Pod paths to collect on export: each write-back rule's file or folder. */
+/** Pod paths to collect on export: each agent-memory folder. */
 export function exportRoots(rules: ConcreteRule[]): string[] {
   const roots = new Set<string>();
-  for (const r of rules) if (r.flow !== "in") roots.add(shape(r.to).prefix);
+  for (const r of rules) if (r.memory) roots.add(shape(r.to).prefix);
   return [...roots].sort();
 }
 

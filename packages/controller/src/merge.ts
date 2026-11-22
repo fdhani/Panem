@@ -3,8 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git } from "./git";
 
-export type MergeMode = "union" | "pod";
-
 export interface MergeOutcome {
   /** New content for the source, or undefined to leave it as it is. */
   content?: Uint8Array;
@@ -22,15 +20,13 @@ export const isBinary = (b: Uint8Array | undefined) => b?.includes(0);
  * Three-way merge of one file written back from a pod.
  * - unchanged in the pod since the base: leave the source alone (incl. a file deleted there)
  * - source unchanged since the base, or new on both sides only in the pod: take the pod's
- * - both changed, text: `git merge-file`, keeping both sides' lines ("union") or preferring the
- *   pod's on conflicting lines ("pod")
+ * - both changed, text: `git merge-file --union`, keeping both sides' lines
  * - both changed, binary: keep the source's copy and say so
  */
 export async function mergeFile(
   current: Uint8Array | undefined,
   base: Uint8Array | undefined,
   pod: Uint8Array,
-  mode: MergeMode = "union",
 ): Promise<MergeOutcome> {
   if (base !== undefined && eq(pod, base)) return {};
   if (current === undefined) {
@@ -42,7 +38,7 @@ export async function mergeFile(
   if (isBinary(current) || isBinary(pod) || isBinary(base)) {
     return { note: "binary file changed on both sides; kept the source's copy" };
   }
-  const merged = await gitMergeFile(current, base ?? new Uint8Array(), pod, mode);
+  const merged = await gitMergeFile(current, base ?? new Uint8Array(), pod);
   return eq(merged, current) ? {} : { content: merged };
 }
 
@@ -50,7 +46,6 @@ async function gitMergeFile(
   current: Uint8Array,
   base: Uint8Array,
   pod: Uint8Array,
-  mode: MergeMode,
 ): Promise<Uint8Array> {
   const dir = await mkdtemp(join(tmpdir(), "panem-merge-"));
   try {
@@ -62,8 +57,8 @@ async function gitMergeFile(
     await writeFile(c, ensureNl(current));
     await writeFile(b, ensureNl(base));
     await writeFile(p, ensureNl(pod));
-    // Exit code is the number of conflicts; --union / --theirs resolve them all.
-    await git(dir, ["merge-file", mode === "pod" ? "--theirs" : "--union", c, b, p], false);
+    // Exit code is the number of conflicts; --union resolves them all.
+    await git(dir, ["merge-file", "--union", c, b, p], false);
     return new Uint8Array(await readFile(c));
   } finally {
     await rm(dir, { recursive: true, force: true });

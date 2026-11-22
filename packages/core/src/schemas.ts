@@ -165,8 +165,6 @@ export const Job = z.object({
   status: JobStatus,
   attempts: z.number().int().default(0),
   error: z.string().optional(),
-  /** Sync sources already exported; a retry skips them. */
-  exported: z.array(z.string()).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
