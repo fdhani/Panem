@@ -6,7 +6,7 @@ Panem is a small controller that runs on an always-on Linux box in your Tailscal
 its web UI (also usable on a phone) or CLI, you can summon an isolated devcontainer pod on any
 of your machines. Each pod boots with:
 
-- your repos at the refs you chose, under `/workspace/<repo>`;
+- your repos at the refs you chose, under `/codebase/<repo>`;
 - your CLAUDE.md, memory, skills, and plans;
 - a Claude Code Remote Control session, which you open from the Claude app.
 
@@ -64,7 +64,7 @@ The UI and API listen only on `127.0.0.1` and the host's Tailscale IP (port 7420
 
 1. The controller pulls the workspace repo and records its commit (`workspaceSha`).
 2. It runs `devpod up <workspace repo>@<branch> --devcontainer-path templates/<t>/... --provider m-<host>`. The pod metadata (`PANEM_POD`) and the Claude token are passed through a 0600 env file.
-3. The Feature's **postCreateCommand** clones each repo at its ref (only pushed work is reachable) and copies CLAUDE.md, skills, plans, and `memory/<repo>` into `~/.claude`. It also pre-trusts `/workspace/*`.
+3. The Feature's **postCreateCommand** clones each repo at its ref (only pushed work is reachable) and copies CLAUDE.md, skills, plans, and `memory/<repo>` into `~/.claude`. It also pre-trusts `/codebase/*`, and keeps Panem's own files (pod.json, logs) in `~/.panem/`.
 4. The Feature's **postStartCommand** (re)starts `claude remote-control --name <pod id>` in tmux on every start.
 
 ## Reaching pod services (ports)
@@ -97,7 +97,7 @@ phone ──tailnet──▶ vps:7601 ──▶ panem-forwarder ──docker net
 
 Delete runs as a queued job, one at a time:
 1. Start the pod if it is stopped.
-2. Pull every `~/.claude/projects/-workspace-<repo>/memory/**` file out of the pod.
+2. Pull every `~/.claude/projects/-codebase-<repo>/memory/**` file out of the pod (pods created before the `/codebase` rename use `-workspace-<repo>`, which is still recognised).
 3. Merge each file three ways with `git merge-file --union`: the current file, the file at `workspaceSha`, and the pod's file. Lines added on both sides are all kept.
 4. Commit, push (retrying on push races), and only then delete the pod.
 
@@ -126,7 +126,7 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 ## Known gaps and things to verify
 
 - Whether DevPod containers come back after a host reboot (restart policy) is untested. Pods may need `panem pod start` afterwards.
-- Remote Control running headless with `CLAUDE_CODE_OAUTH_TOKEN` must be confirmed on a real pod. Its output is logged to `/workspace/.panem/remote-control.log`.
+- Remote Control running headless with `CLAUDE_CODE_OAUTH_TOKEN` must be confirmed on a real pod. Its output is logged to `~/.panem/remote-control.log`.
 - Cloning private repos inside a pod relies on DevPod forwarding the controller's git credentials during `up`.
 - Back up `~/.devpod` on the controller. If it is lost, re-add the machines; pods that DevPod lists again can be re-labelled with `panem rediscover`.
 - Using one Claude subscription on several machines at once: check Anthropic's terms.

@@ -7,7 +7,7 @@ set -e
 source dev-container-features-test-lib
 check "hook scripts installed" test -x /usr/local/share/panem/post-create.sh
 check "relay installed" test -x /usr/local/share/panem/relay-conn.sh
-check "workspace root writable" test -w /workspace
+check "code root writable" test -w /codebase
 check "tmux" command -v tmux
 check "jq" command -v jq
 check "socat" command -v socat

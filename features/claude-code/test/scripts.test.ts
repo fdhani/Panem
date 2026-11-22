@@ -7,7 +7,7 @@ import { join } from "node:path";
 const scripts = join(import.meta.dir, "../src/claude-code/scripts");
 const root = mkdtempSync(join(tmpdir(), "panem-feature-"));
 const home = join(root, "home");
-const ws = join(root, "workspace");
+const ws = join(root, "codebase");
 const ctx = join(root, "ctx");
 const bin = join(root, "bin");
 const tmuxSock = join(root, "tmux.sock");
@@ -53,7 +53,7 @@ beforeAll(() => {
   writeFileSync(join(ctx, "memory/api/MEMORY.md"), "- fact\n");
   writeFileSync(join(ctx, "skills/deploy/SKILL.md"), "skill\n");
   env = {
-    PANEM_WORKSPACE_ROOT: ws,
+    PANEM_CODE_ROOT: ws,
     PANEM_CONTEXT_DIR: ctx,
     CLAUDE_CODE_OAUTH_TOKEN: "tok-123",
     PANEM_RELAY_SECRET: "sec-1",
@@ -86,7 +86,22 @@ test("post-create clones repos at refs and materializes context", () => {
   const cj = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"));
   expect(cj.hasCompletedOnboarding).toBe(true);
   expect(cj.projects[`${ws}/api`].hasTrustDialogAccepted).toBe(true);
-  expect(JSON.parse(readFileSync(join(ws, ".panem/pod.json"), "utf8")).id).toBe("shop-abc123");
+  // Panem's state lives in $HOME/.panem, outside the code tree.
+  expect(JSON.parse(readFileSync(join(home, ".panem/pod.json"), "utf8")).id).toBe("shop-abc123");
+  expect(existsSync(join(ws, ".panem"))).toBe(false);
+});
+
+test("the pre-rename PANEM_WORKSPACE_ROOT is still honoured", () => {
+  const { PANEM_CODE_ROOT: _, ...rest } = env;
+  const legacyHome = join(root, "legacy-home");
+  mkdirSync(legacyHome, { recursive: true });
+  const legacyRoot = join(root, "legacy-root");
+  sh(`bash ${scripts}/post-create.sh`, root, {
+    ...rest,
+    PANEM_WORKSPACE_ROOT: legacyRoot,
+    HOME: legacyHome,
+  });
+  expect(existsSync(join(legacyRoot, "api/f.txt"))).toBe(true);
 });
 
 test("post-create is idempotent", () => {

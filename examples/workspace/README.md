@@ -4,7 +4,7 @@ Copy this folder into a new **private** git repo and point `panem init --workspa
 
 ```
 CLAUDE.md                          -> ~/.claude/CLAUDE.md in every pod
-memory/<repo>/                     <-> ~/.claude/projects/-workspace-<repo>/memory/
+memory/<repo>/                     <-> ~/.claude/projects/-codebase-<repo>/memory/
 skills/  plans/  agents/  commands/ -> ~/.claude/<same>
 templates/<name>/template.json     repos and default refs
 templates/<name>/.devcontainer/    devcontainer.json using the claude-code Feature

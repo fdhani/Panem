@@ -11,5 +11,5 @@
     "PANEM_CONTEXT_DIR": "${containerWorkspaceFolder}"
   },
   // Dev servers: runs on every start, after the Feature's Remote Control hook.
-  "postStartCommand": "cd /workspace/api && (docker compose up -d || true)"
+  "postStartCommand": "cd /codebase/api && (docker compose up -d || true)"
 }

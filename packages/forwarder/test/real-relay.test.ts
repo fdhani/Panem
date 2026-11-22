@@ -31,7 +31,7 @@ test.skipIf(!hasSocat)("end to end through socat relay-conn.sh", async () => {
         env: {
           ...process.env,
           PANEM_RELAY_SECRET: SECRET,
-          PANEM_WORKSPACE_ROOT: ws,
+          PANEM_STATE_DIR: join(ws, ".panem"),
           PANEM_RELAY_PORT: String(relayPort),
         },
         stderr: "ignore",

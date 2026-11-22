@@ -67,7 +67,7 @@ beforeAll(async () => {
       env: {
         ...process.env,
         PANEM_RELAY_SECRET: SECRET,
-        PANEM_WORKSPACE_ROOT: root,
+        PANEM_STATE_DIR: join(root, ".panem"),
         PANEM_RELAY_PORT: String(relayPort),
       },
       stderr: "ignore",

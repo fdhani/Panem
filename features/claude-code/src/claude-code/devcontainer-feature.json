@@ -1,8 +1,8 @@
 {
   "id": "claude-code",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "name": "Claude Code (Panem pod agent)",
-  "description": "Installs Claude Code, clones the pod's repos into /workspace, materializes CLAUDE.md, memory, skills, and plans, and keeps a Remote Control session running.",
+  "description": "Installs Claude Code, clones the pod's repos into /codebase, materializes CLAUDE.md, memory, skills, and plans, and keeps a Remote Control session running.",
   "documentationURL": "https://github.com/fdhani/panem/tree/main/features/claude-code",
   "options": {
     "installClaude": {
@@ -23,7 +23,7 @@
     }
   },
   "containerEnv": {
-    "PANEM_WORKSPACE_ROOT": "/workspace"
+    "PANEM_CODE_ROOT": "/codebase"
   },
   "postCreateCommand": "/usr/local/share/panem/post-create.sh",
   "postStartCommand": "/usr/local/share/panem/post-start.sh",

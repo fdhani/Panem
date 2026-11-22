@@ -11,6 +11,7 @@ import {
   type PodBackend,
   PodMeta,
   type PodState,
+  READ_POD_JSON,
   type ServerEvent,
   type SummonRequest,
   devcontainerPathFor,
@@ -648,7 +649,7 @@ export class PodService {
       if (this.d.pods.get(b.id)) continue;
       try {
         if (b.status !== "running") throw new Error("not running");
-        const r = await this.d.backend.exec(b.id, "cat /workspace/.panem/pod.json");
+        const r = await this.d.backend.exec(b.id, READ_POD_JSON);
         if (r.exitCode !== 0) throw new Error(r.stderr);
         const meta = PodMeta.parse({
           ...JSON.parse(new TextDecoder().decode(r.stdout)),

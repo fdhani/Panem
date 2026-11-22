@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # postCreateCommand: runs once, as the remote user, after the container is created.
-# 1. Clone each repo at its ref into /workspace/<repo> (only pushed work is reachable).
+# 1. Clone each repo at its ref into /codebase/<repo> (only pushed work is reachable).
 # 2. Materialize context from the workspace repo into ~/.claude.
-# 3. Pre-trust /workspace/* so Remote Control can start without a prompt.
+# 3. Pre-trust /codebase/* so Remote Control can start without a prompt.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
-if [ ! -w "$PANEM_WORKSPACE_ROOT" ]; then
-  # Image built before the user's UID was remapped: take ownership if sudo allows it.
-  sudo -n mkdir -p "$PANEM_WORKSPACE_ROOT" 2>/dev/null || true
-  sudo -n chown "$(id -u):$(id -g)" "$PANEM_WORKSPACE_ROOT" 2>/dev/null || true
-fi
-if [ ! -w "$PANEM_WORKSPACE_ROOT" ]; then
-  echo "[panem] $PANEM_WORKSPACE_ROOT is not writable by $(id -un) ($(id -u)): $(ls -ld "$PANEM_WORKSPACE_ROOT")" >&2
-  exit 1
-fi
+# State lives in $HOME, so the log works even if the code root below can't be set up.
 mkdir -p "$PANEM_STATE_DIR" "$CLAUDE_HOME"
 # Keep a log inside the pod: lifecycle output is otherwise easy to lose.
 exec > >(tee -a "$PANEM_STATE_DIR/post-create.log") 2>&1
 log "post-create start: user=$(id -un) pwd=$PWD pod_env=${PANEM_POD:+set}"
+
+if [ ! -w "$PANEM_CODE_ROOT" ]; then
+  # Image built before the user's UID was remapped: take ownership if sudo allows it.
+  sudo -n mkdir -p "$PANEM_CODE_ROOT" 2>/dev/null || true
+  sudo -n chown "$(id -u):$(id -g)" "$PANEM_CODE_ROOT" 2>/dev/null || true
+fi
+if [ ! -w "$PANEM_CODE_ROOT" ]; then
+  echo "[panem] $PANEM_CODE_ROOT is not writable by $(id -un) ($(id -u)): $(ls -ld "$PANEM_CODE_ROOT" 2>&1)" >&2
+  exit 1
+fi
 
 POD="$(pod_json)"
 CONTEXT_DIR="${PANEM_CONTEXT_DIR:-$PWD}"
@@ -30,7 +32,7 @@ for i in $(seq 0 $((count - 1))); do
   name="$(printf '%s' "$POD" | jq -r ".repos[$i].name")"
   url="$(printf '%s' "$POD" | jq -r ".repos[$i].url")"
   ref="$(printf '%s' "$POD" | jq -r ".repos[$i].ref")"
-  dest="$PANEM_WORKSPACE_ROOT/$name"
+  dest="$PANEM_CODE_ROOT/$name"
   if [ -d "$dest/.git" ]; then
     log "repo $name already present, skipping clone"
     continue
@@ -57,17 +59,17 @@ if [ -d "$CONTEXT_DIR/memory" ]; then
   for repo_mem in "$CONTEXT_DIR"/memory/*/; do
     [ -d "$repo_mem" ] || continue
     repo="$(basename "$repo_mem")"
-    target="$CLAUDE_HOME/projects/$(claude_project_dir "$PANEM_WORKSPACE_ROOT/$repo")/memory"
+    target="$CLAUDE_HOME/projects/$(claude_project_dir "$PANEM_CODE_ROOT/$repo")/memory"
     mkdir -p "$target"
     cp -R "$repo_mem." "$target/"
   done
 fi
 
-# ---- 3. claude settings: onboarding done, /workspace/* trusted ----
+# ---- 3. claude settings: onboarding done, /codebase/* trusted ----
 CLAUDE_JSON="$HOME/.claude.json"
 [ -f "$CLAUDE_JSON" ] || echo '{}' >"$CLAUDE_JSON"
 trusted="$(
-  printf '%s' "$POD" | jq -c --arg root "$PANEM_WORKSPACE_ROOT" \
+  printf '%s' "$POD" | jq -c --arg root "$PANEM_CODE_ROOT" \
     '[.repos[]?.name | "\($root)/\(.)"] + [$root]'
 )"
 tmp="$(mktemp)"

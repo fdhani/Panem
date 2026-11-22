@@ -1,7 +1,13 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { type PodBackend, type PodMeta, claudeProjectDir, repoPath } from "@panem/core";
+import {
+  LEGACY_CODE_ROOT,
+  type PodBackend,
+  type PodMeta,
+  claudeProjectDir,
+  repoPath,
+} from "@panem/core";
 import { type WorkspaceRepo, git } from "./git";
 import { unionMerge } from "./merge";
 
@@ -83,9 +89,16 @@ async function walk(dir: string): Promise<string[]> {
   return out;
 }
 
-/** "-workspace-api/memory/MEMORY.md" -> "memory/api/MEMORY.md", only for the pod's own repos. */
+/**
+ * "-codebase-api/memory/MEMORY.md" -> "memory/api/MEMORY.md", only for the pod's own repos.
+ * Pods created before the /codebase rename keep memory under "-workspace-api"; map those too.
+ */
 export function mapToWorkspace(files: string[], pod: PodMeta): { src: string; dest: string }[] {
-  const byProject = new Map(pod.repos.map((r) => [claudeProjectDir(repoPath(r.name)), r.name]));
+  const byProject = new Map<string, string>();
+  for (const r of pod.repos) {
+    byProject.set(claudeProjectDir(repoPath(r.name, LEGACY_CODE_ROOT)), r.name);
+    byProject.set(claudeProjectDir(repoPath(r.name)), r.name);
+  }
   const out: { src: string; dest: string }[] = [];
   for (const f of files) {
     const [project, mem, ...rest] = f.replace(/^\.\//, "").split("/");

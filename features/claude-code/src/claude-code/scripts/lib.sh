@@ -15,8 +15,13 @@ if [ -f "$HOME/.config/panem/env" ]; then
   unset _tok _sec
 fi
 
-PANEM_WORKSPACE_ROOT="${PANEM_WORKSPACE_ROOT:-/workspace}"
-PANEM_STATE_DIR="$PANEM_WORKSPACE_ROOT/.panem"
+# Code repos live here, at the same path on every machine (Claude names its per-project memory
+# folders after it). PANEM_WORKSPACE_ROOT is the name used before the /codebase rename.
+PANEM_CODE_ROOT="${PANEM_CODE_ROOT:-${PANEM_WORKSPACE_ROOT:-/codebase}}"
+# Panem's own per-pod files (pod.json, logs): outside the code tree, so never committed.
+PANEM_STATE_DIR="${PANEM_STATE_DIR:-$HOME/.panem}"
+# Where pods created before the rename kept their state.
+PANEM_LEGACY_STATE_DIR=/workspace/.panem
 # shellcheck disable=SC2034 # used by the scripts that source this file
 CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 export PATH="$HOME/.local/bin:$PATH"
@@ -31,6 +36,8 @@ pod_json() {
     printf '%s' "$PANEM_POD"
   elif [ -f "$PANEM_STATE_DIR/pod.json" ]; then
     cat "$PANEM_STATE_DIR/pod.json"
+  elif [ -f "$PANEM_LEGACY_STATE_DIR/pod.json" ]; then
+    cat "$PANEM_LEGACY_STATE_DIR/pod.json"
   else
     echo '{}'
   fi
@@ -39,9 +46,9 @@ pod_json() {
 primary_repo_dir() {
   local name
   name="$(pod_json | jq -r '.repos[0].name // empty')"
-  if [ -n "$name" ] && [ -d "$PANEM_WORKSPACE_ROOT/$name" ]; then
-    printf '%s/%s' "$PANEM_WORKSPACE_ROOT" "$name"
+  if [ -n "$name" ] && [ -d "$PANEM_CODE_ROOT/$name" ]; then
+    printf '%s/%s' "$PANEM_CODE_ROOT" "$name"
   else
-    printf '%s' "$PANEM_WORKSPACE_ROOT"
+    printf '%s' "$PANEM_CODE_ROOT"
   fi
 }

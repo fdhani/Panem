@@ -16,7 +16,7 @@ fi
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" \
   -e "PANEM_RELAY_SECRET=$PANEM_RELAY_SECRET" \
-  -e "PANEM_WORKSPACE_ROOT=$PANEM_WORKSPACE_ROOT" \
+  -e "PANEM_STATE_DIR=$PANEM_STATE_DIR" \
   -e "PANEM_RELAY_PORT=${PANEM_RELAY_PORT:-7699}" \
   -e "PATH=$PATH" \
   "socat TCP-LISTEN:${PANEM_RELAY_PORT:-7699},fork,reuseaddr SYSTEM:'$(dirname "$0")/relay-conn.sh'"

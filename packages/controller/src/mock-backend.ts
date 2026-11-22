@@ -10,6 +10,7 @@ import {
   type ForwarderStatus,
   PANEM_VERSION,
   type PodBackend,
+  READ_POD_JSON,
   type UpOptions,
   claudeProjectDir,
   repoPath,
@@ -86,7 +87,7 @@ export class MockBackend implements PodBackend {
     await this.step("exec");
     const p = this.pod(id);
     if (p.status !== "running") return fail("DevPod workspace is stopped");
-    if (command.startsWith("cat /workspace/.panem/pod.json")) {
+    if (command === READ_POD_JSON) {
       return { exitCode: 0, stdout: new TextEncoder().encode(p.env.PANEM_POD ?? "{}"), stderr: "" };
     }
     if (!command.includes("memory")) return fail(`mock: unsupported command ${command}`);

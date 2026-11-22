@@ -107,13 +107,13 @@ try {
   assert(listed?.status === "running", `running after up (got ${listed?.status})`);
 
   step("context injected");
-  if ((await run("test -d /workspace/hello/.git")).code !== 0) {
+  if ((await run("test -d /codebase/hello/.git")).code !== 0) {
     // Print what the pod looks like so a CI failure is diagnosable without a debugger.
     for (const cmd of [
       "id; echo HOME=$HOME; pwd",
       "env | grep -E '^PANEM|^DEVPOD|^REMOTE' | sed 's/=.*SECRET.*/=<redacted>/' || true",
-      "ls -la /workspace /workspace/.panem /usr/local/share/panem 2>&1",
-      "cat /workspace/.panem/post-create.log 2>&1",
+      "ls -la /codebase ~/.panem /usr/local/share/panem 2>&1",
+      "cat ~/.panem/post-create.log 2>&1",
       "ls -la ~ ~/.claude 2>&1",
       "ls / ; ls /workspaces 2>&1 | head",
     ]) {
@@ -122,14 +122,11 @@ try {
     }
     assert(false, "repo cloned");
   }
-  assert(
-    (await run("git -C /workspace/hello rev-parse --abbrev-ref HEAD")).out === "master",
-    "ref",
-  );
+  assert((await run("git -C /codebase/hello rev-parse --abbrev-ref HEAD")).out === "master", "ref");
   assert((await run("cat ~/.claude/CLAUDE.md")).out === "# integration", "CLAUDE.md");
   const memDir = `~/.claude/projects/${claudeProjectDir(repoPath("hello"))}/memory`;
   assert((await run(`cat ${memDir}/MEMORY.md`)).out === "- seeded fact", "memory seeded");
-  assert((await run("jq -r .id /workspace/.panem/pod.json")).out === id, "pod.json");
+  assert((await run("jq -r .id ~/.panem/pod.json")).out === id, "pod.json");
 
   step("stop / start keeps disk");
   await run(`echo '- learned in pod' >> ${memDir}/MEMORY.md`);

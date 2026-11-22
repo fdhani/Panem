@@ -16,7 +16,7 @@ export const GitRef = z
   .refine((r) => !r.startsWith("-") && !r.includes(".."), "invalid git ref");
 
 export const TemplateRepo = z.object({
-  /** Folder name under /workspace. */
+  /** Folder name under /codebase. */
   name: Slug,
   url: z.string().min(1),
   ref: GitRef.default("main"),

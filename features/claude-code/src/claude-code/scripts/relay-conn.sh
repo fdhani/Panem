@@ -2,10 +2,11 @@
 # One relay connection (spawned by socat per client). stdin/stdout are the socket.
 # Protocol: first line "<secret> <cmd>", where cmd is:
 #   list   -> listening TCP ports, one "port addr" per line (addr: IPv4 or ::1)
-#   meta   -> /workspace/.panem/pod.json
+#   meta   -> ~/.panem/pod.json (or /workspace/.panem/pod.json on pods from before the rename)
 #   <port> -> raw byte pipe to that port on the pod's own loopback
 set -uo pipefail
-STATE="${PANEM_WORKSPACE_ROOT:-/workspace}/.panem"
+STATE="${PANEM_STATE_DIR:-$HOME/.panem}"
+[ -f "$STATE/pod.json" ] || STATE=/workspace/.panem
 RELAY_PORT="${PANEM_RELAY_PORT:-7699}"
 
 IFS=' ' read -r -t 5 secret cmd || exit 0

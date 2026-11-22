@@ -37,11 +37,11 @@ PANEM_REMOTE_CONTROL=${REMOTE_CONTROL}
 PANEM_PERMISSION_MODE=${PERMISSION_MODE}
 ENV
 
-mkdir -p /workspace
-chown "$REMOTE_USER" /workspace 2>/dev/null || true
+mkdir -p /codebase
+chown "$REMOTE_USER" /codebase 2>/dev/null || true
 # Devcontainer tooling may remap the user's UID to the host's after this build step, which
-# would leave /workspace owned by a stale UID. Sticky + world-writable (like /tmp) avoids that.
-chmod 1777 /workspace
+# would leave /codebase owned by a stale UID. Sticky + world-writable (like /tmp) avoids that.
+chmod 1777 /codebase
 
 if [ "$INSTALL_CLAUDE" = "true" ]; then
   # Install for the remote user so updates and ~/.local/bin land in their home.

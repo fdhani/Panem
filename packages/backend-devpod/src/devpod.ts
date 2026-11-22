@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackendMachine, BackendPod, ExecResult, PodBackend, UpOptions } from "@panem/core";
-import { BackendError } from "@panem/core";
+import { BackendError, LEGACY_POD_STATE_DIR } from "@panem/core";
 import { run, text } from "./run";
 
 /** DevPod version this backend is tested against. Bump together with the CI integration test. */
@@ -13,7 +13,8 @@ const HOOKS = "/usr/local/share/panem";
 /** First boot: one-time setup unless pod.json shows it already ran, then the start hook. */
 export const BOOTSTRAP_CREATE = [
   `if [ -x ${HOOKS}/post-create.sh ]; then`,
-  `  if [ ! -f /workspace/.panem/pod.json ]; then ${HOOKS}/post-create.sh || exit $?; fi;`,
+  // pod.json marks setup as done: ~/.panem today, /workspace/.panem before the rename.
+  `  if [ ! -f "$HOME/.panem/pod.json" ] && [ ! -f ${LEGACY_POD_STATE_DIR}/pod.json ]; then ${HOOKS}/post-create.sh || exit $?; fi;`,
   `  ${HOOKS}/post-start.sh;`,
   "fi",
 ].join(" ");

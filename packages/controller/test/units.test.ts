@@ -20,16 +20,24 @@ describe("mapToWorkspace", () => {
     expect(
       mapToWorkspace(
         [
-          "./-workspace-api/memory/MEMORY.md",
-          "-workspace-api/memory/sub/a.md",
-          "-workspace-other/memory/x.md",
+          "./-codebase-api/memory/MEMORY.md",
+          "-codebase-api/memory/sub/a.md",
+          "-codebase-other/memory/x.md",
           "-home-me/memory/x.md",
-          "-workspace-api/transcript.jsonl",
-          "-workspace-api/memory/../../etc",
+          "-codebase-api/transcript.jsonl",
+          "-codebase-api/memory/../../etc",
         ],
         pod,
       ).map((m) => m.dest),
     ).toEqual(["memory/api/MEMORY.md", "memory/api/sub/a.md"]);
+  });
+
+  test("pods from before the /codebase rename still export their memory", () => {
+    expect(
+      mapToWorkspace(["-workspace-api/memory/old.md", "-workspace-other/memory/x.md"], pod).map(
+        (m) => m.dest,
+      ),
+    ).toEqual(["memory/api/old.md"]);
   });
 });
 
@@ -69,7 +77,7 @@ describe("EXPORT_COMMAND", () => {
 
   test("emits a base64 tarball of memory files only", () => {
     const home = mkdtempSync(join(tmpdir(), "panem-exp-"));
-    const proj = join(home, ".claude/projects/-workspace-api");
+    const proj = join(home, ".claude/projects/-codebase-api");
     mkdirSync(join(proj, "memory"), { recursive: true });
     writeFileSync(join(proj, "memory/MEMORY.md"), "fact\n");
     writeFileSync(join(proj, "session.jsonl"), "{}\n");
@@ -78,7 +86,7 @@ describe("EXPORT_COMMAND", () => {
     const out = mkdtempSync(join(tmpdir(), "panem-exp-out-"));
     writeFileSync(join(out, "m.tgz"), Buffer.from(r.stdout.toString(), "base64"));
     const list = Bun.spawnSync(["tar", "-tzf", join(out, "m.tgz")]).stdout.toString();
-    expect(list).toContain("./-workspace-api/memory/MEMORY.md");
+    expect(list).toContain("./-codebase-api/memory/MEMORY.md");
     expect(list).not.toContain("session.jsonl");
   });
 
