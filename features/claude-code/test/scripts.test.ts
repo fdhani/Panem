@@ -40,6 +40,10 @@ beforeAll(() => {
   writeFileSync(join(bin, "tmux"), `#!/bin/sh\nexec ${Bun.which("tmux")} -S ${tmuxSock} "$@"\n`, {
     mode: 0o755,
   });
+  // Like a host without passwordless sudo: every sudo call fails.
+  writeFileSync(join(bin, "sudo"), "#!/bin/sh\necho 'sudo: a password is required' >&2\nexit 1\n", {
+    mode: 0o755,
+  });
   writeFileSync(
     join(bin, "claude"),
     `#!/bin/sh\necho "$PWD $*" > ${root}/claude-args\necho "$CLAUDE_CODE_OAUTH_TOKEN" > ${root}/claude-token\nsleep 30\n`,

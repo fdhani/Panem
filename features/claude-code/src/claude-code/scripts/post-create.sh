@@ -13,8 +13,10 @@ mkdir -p "$PANEM_STATE_DIR" "$CLAUDE_HOME"
 exec > >(tee -a "$PANEM_STATE_DIR/post-create.log") 2>&1
 log "post-create start: user=$(id -un) pwd=$PWD pod_env=${PANEM_POD:+set}"
 
+# Usually the Feature created it at build time; otherwise try without privileges first.
+mkdir -p "$PANEM_CODE_ROOT" 2>/dev/null || true
 if [ ! -w "$PANEM_CODE_ROOT" ]; then
-  # Image built before the user's UID was remapped: take ownership if sudo allows it.
+  # Missing and not creatable, or built before the user's UID was remapped: use sudo if allowed.
   sudo -n mkdir -p "$PANEM_CODE_ROOT" 2>/dev/null || true
   sudo -n chown "$(id -u):$(id -g)" "$PANEM_CODE_ROOT" 2>/dev/null || true
 fi
