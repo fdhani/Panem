@@ -1,7 +1,16 @@
 import type { Job, Pod } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ExternalLink, GitBranch, Play, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
+import {
+  ArrowUpRight,
+  ExternalLink,
+  GitBranch,
+  Play,
+  Plus,
+  RotateCcw,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 import { MachineDot, PodStateBadge } from "../components/status";
 import { Button } from "../components/ui/button";
@@ -113,6 +122,8 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         </ul>
       )}
 
+      {(pod.state === "running" || pod.services.length > 0) && <Services pod={pod} />}
+
       {pod.error && (
         <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">{pod.error}</p>
       )}
@@ -206,5 +217,131 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         </p>
       )}
     </Card>
+  );
+}
+
+function Services({ pod }: { pod: Pod }) {
+  const running = pod.state === "running";
+  const [adding, setAdding] = useState("");
+  const toggle = useMutation({
+    mutationFn: ({ port, exposed }: { port: number; exposed: boolean }) =>
+      api("PUT", `/api/pods/${pod.id}/ports/${port}`, { exposed }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: keys.pods }),
+  });
+  const addPort = Number(adding);
+  const canAdd = Number.isInteger(addPort) && addPort > 0 && addPort < 65536 && !toggle.isPending;
+
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <p className="text-xs font-medium text-muted">Ports</p>
+        {pod.indexUrl && running && (
+          <a
+            href={pod.indexUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-muted underline-offset-2 hover:text-text hover:underline"
+          >
+            All links
+          </a>
+        )}
+      </div>
+      {pod.services.length === 0 && (
+        <p className="px-3 py-2.5 text-xs text-muted">
+          Nothing listening yet. Ports show up here when something starts listening.
+        </p>
+      )}
+      <ul className="divide-y divide-border">
+        {pod.services.map((s) => {
+          const linked = running && s.exposed && s.url;
+          return (
+            <li key={s.podPort} className="flex min-h-12 items-center gap-2 px-3 text-sm">
+              <span
+                className={`size-1.5 shrink-0 rounded-full ${s.live && running ? "bg-ok" : "bg-muted/50"}`}
+                title={s.live ? "Listening" : "Not listening"}
+                aria-hidden
+              />
+              <span className="min-w-0 flex-1 truncate">
+                <span className="font-medium">{s.name ?? `:${s.podPort}`}</span>
+                {s.name && <span className="text-muted"> :{s.podPort}</span>}
+                {linked ? (
+                  <a
+                    href={s.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-2 inline-flex items-center gap-0.5 font-mono text-xs text-accent hover:underline"
+                  >
+                    {s.url!.replace(/^http:\/\//, "")}
+                    <ArrowUpRight className="size-3" />
+                  </a>
+                ) : s.exposed ? (
+                  <span className="ml-2 text-xs text-muted">{running ? "publishing…" : "on"}</span>
+                ) : null}
+              </span>
+              <Switch
+                checked={s.exposed}
+                disabled={toggle.isPending}
+                label={`Expose ${s.name ?? `port ${s.podPort}`}`}
+                onChange={(exposed) => toggle.mutate({ port: s.podPort, exposed })}
+              />
+            </li>
+          );
+        })}
+      </ul>
+      <form
+        className="flex items-center gap-2 border-t border-border px-3 py-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!canAdd) return;
+          toggle.mutate({ port: addPort, exposed: true }, { onSuccess: () => setAdding("") });
+        }}
+      >
+        <input
+          inputMode="numeric"
+          pattern="[0-9]*"
+          aria-label="Port to expose"
+          placeholder="Expose another port…"
+          value={adding}
+          onChange={(e) => setAdding(e.target.value.replace(/\D/g, "").slice(0, 5))}
+          className="h-9 min-w-0 flex-1 rounded-md border border-border bg-surface px-2 font-mono text-base sm:text-sm"
+        />
+        <Button type="submit" size="sm" disabled={!canAdd}>
+          Expose
+        </Button>
+      </form>
+      {toggle.error && (
+        <p className="border-t border-border px-3 py-2 text-xs break-words text-bad">
+          {toggle.error.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Switch({
+  checked,
+  disabled,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: string;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-6 w-10 shrink-0 items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:opacity-50 ${checked ? "bg-accent" : "bg-border"}`}
+    >
+      <span
+        className={`inline-block size-5 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-[18px]" : "translate-x-0.5"}`}
+      />
+    </button>
   );
 }

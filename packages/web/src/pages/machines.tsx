@@ -1,7 +1,9 @@
+import type { ForwarderStatus } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { MachineDot } from "../components/status";
+import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { Field, Input } from "../components/ui/field";
@@ -21,6 +23,10 @@ export function MachinesPage() {
       setUser("");
       refresh();
     },
+  });
+  const repair = useMutation({
+    mutationFn: (name: string) => api("POST", `/api/machines/${name}/repair`),
+    onSettled: refresh,
   });
   const remove = useMutation({
     mutationFn: (name: string) => api("DELETE", `/api/machines/${name}`),
@@ -46,6 +52,25 @@ export function MachinesPage() {
                   {m.user ? `${m.user}@` : ""}
                   {m.host} · {m.status} · {count} pod{count === 1 ? "" : "s"}
                 </p>
+                {m.forwarder && m.forwarder.status !== "disabled" && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    <ForwarderBadge f={m.forwarder} />
+                    {m.forwarder.status !== "running" && m.status !== "offline" && (
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 text-xs text-accent disabled:opacity-50"
+                        disabled={repair.isPending}
+                        onClick={() => repair.mutate(m.name)}
+                      >
+                        <RefreshCw className={`size-3 ${repair.isPending ? "animate-spin" : ""}`} />
+                        Repair
+                      </button>
+                    )}
+                  </div>
+                )}
+                {m.forwarder?.error && m.forwarder.status !== "running" && (
+                  <p className="mt-1 text-xs break-words text-bad">{m.forwarder.error}</p>
+                )}
               </div>
               <Button
                 variant="ghost"
@@ -62,6 +87,7 @@ export function MachinesPage() {
         })}
       </Card>
       {remove.error && <p className="text-sm text-bad">{remove.error.message}</p>}
+      {repair.error && <p className="text-sm text-bad">{repair.error.message}</p>}
 
       <form
         onSubmit={(e) => {
@@ -106,4 +132,17 @@ export function MachinesPage() {
       </form>
     </div>
   );
+}
+
+function ForwarderBadge({ f }: { f: ForwarderStatus }) {
+  const tone = f.status === "running" ? "ok" : f.status === "outdated" ? "warn" : "bad";
+  const text =
+    f.status === "running"
+      ? "ports exposed"
+      : f.status === "outdated"
+        ? "forwarder outdated"
+        : f.status === "missing"
+          ? "forwarder not responding"
+          : "forwarder error";
+  return <Badge tone={tone}>{text}</Badge>;
 }

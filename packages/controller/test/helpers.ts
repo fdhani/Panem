@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "@panem/core";
+import type { Forwarders } from "../src/forwarders";
 import { MockBackend } from "../src/mock-backend";
 import { StaticProbe } from "../src/probe";
 import { createController } from "../src/server";
@@ -69,12 +70,19 @@ export function makeWorkspace() {
   };
 }
 
-export async function makeController(opts: { dataDir?: string; origin: string; root: string }) {
+export async function makeController(opts: {
+  dataDir?: string;
+  origin: string;
+  root: string;
+  forwarders?: Forwarders;
+  relaySecret?: string;
+}) {
   const backend = new MockBackend();
   await backend.addMachine({ name: "m-vps", host: "vps" });
   await backend.addMachine({ name: "m-mac", host: "mac" });
   const probe = new StaticProbe({ vps: "online", mac: "online" });
   const config: Config = {
+    forwarder: { portRange: [7600, 7699], controlPort: 7599, blockSize: 10 },
     workspaceRepoUrl: opts.origin,
     workspaceBranch: "main",
     apiToken: TOKEN,
@@ -82,9 +90,17 @@ export async function makeController(opts: { dataDir?: string; origin: string; r
     port: 0,
     devpodPath: "devpod",
     listen: ["127.0.0.1"],
+    relaySecret: opts.relaySecret,
   };
   const dataDir = opts.dataDir ?? mkdtempSync(join(opts.root, "data-"));
-  const ctl = await createController({ config, dataDir, backend, probe, log: () => {} });
+  const ctl = await createController({
+    config,
+    dataDir,
+    backend,
+    probe,
+    forwarders: opts.forwarders ?? noForwarders,
+    log: () => {},
+  });
   await ctl.service.refresh();
   const req = (method: string, path: string, body?: unknown) =>
     ctl.app.request(path, {
@@ -104,3 +120,18 @@ export async function until(fn: () => boolean | Promise<boolean>, ms = 5000) {
   }
   throw new Error("timed out waiting for condition");
 }
+
+/** Forwarding switched off: what an old config without secrets gets. */
+export const noForwarders: Forwarders = {
+  enabled: false,
+  linkHost: async (m) => m.host,
+  state: async () => {
+    throw new Error("disabled");
+  },
+  ensure: async () => ({ status: "disabled" }),
+  release: async () => {},
+  setExposed: async () => {
+    throw new Error("disabled");
+  },
+  remove: async () => {},
+};

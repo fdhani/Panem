@@ -11,6 +11,8 @@ of your machines. Each pod boots with:
 - a Claude Code Remote Control session, which you open from the Claude app.
 
 When you delete a pod, the memory Claude built inside it is merged back into your workspace repo.
+The pod's dev servers are reachable from anywhere on your tailnet, served directly by the machine
+the pod runs on.
 
 ```
  phone / laptop ──Tailscale──▶ controller (panem serve) ──devpod──▶ machine A: pod, pod
@@ -65,6 +67,32 @@ The UI and API listen only on `127.0.0.1` and the host's Tailscale IP (port 7420
 3. The Feature's **postCreateCommand** clones each repo at its ref (only pushed work is reachable) and copies CLAUDE.md, skills, plans, and `memory/<repo>` into `~/.claude`. It also pre-trusts `/workspace/*`.
 4. The Feature's **postStartCommand** (re)starts `claude remote-control --name <pod id>` in tmux on every start.
 
+## Reaching pod services (ports)
+
+Each machine runs one `panem-forwarder` container, which the controller deploys over SSH. It publishes ports **only on that machine's Tailscale IP**, so traffic goes straight to the machine without passing through the home server.
+
+```
+phone ──tailnet──▶ vps:7601 ──▶ panem-forwarder ──docker network──▶ relay in pod :7699 ──▶ localhost:5173
+```
+
+- **Blocks:** each pod gets a block of 10 host ports from 7600–7699 on its machine. Slot 0 (e.g. `vps:7600`) is an index page of the pod's published services. Slots 1–9 are for ports you switch on.
+- **Off by default:** every port listening in the pod is listed on its card, including servers bound to `localhost`, but each stays closed until you switch it on.
+  - A switched-on port keeps its host port across stop and start, until you switch it off or delete the pod.
+  - The "Expose another port" field switches on a port that isn't listening yet.
+  - From the CLI: `panem pod expose <id> <port>` and `panem pod unexpose <id> <port>`.
+- **Templates:** ports a template names start switched on, and `ignorePorts` hides ports entirely:
+  ```json
+  { "ports": { "5173": "web", "8000": "api" }, "ignorePorts": [9229] }
+  ```
+- **Where the switches live:** in the controller's pod metadata. They're pushed to the forwarder when you flip one, and re-synced on every poll, so a redeployed forwarder comes back with the same ports open.
+- **How it works:**
+  1. Inside the pod, a small relay (socat on port 7699, never published) answers the forwarder with the pod's listening ports and pipes connections to them.
+  2. The forwarder on each machine polls those relays every 3 seconds.
+  3. The controller reads each forwarder's table (`GET /state`) every 5 seconds.
+- **Secrets:** a shared relay secret and a forwarder token live in the controller config. `panem serve` adds them to older configs automatically.
+- **Repair:** `panem machine repair <name>` (or **Repair** in the UI) redeploys a forwarder. Outdated or unresponsive forwarders are also redeployed automatically.
+- **Who can reach the services:** anyone on your tailnet, without the API token. Use Tailscale ACLs to narrow that if needed.
+
 ## Memory export
 
 Delete runs as a queued job, one at a time:
@@ -89,7 +117,8 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 | --- | --- |
 | `packages/core` | zod schemas, the `PodBackend` interface, naming, config |
 | `packages/backend-devpod` | `PodBackend` on the DevPod CLI (`Bun.spawn`, pinned version) |
-| `packages/controller` | Hono API + SSE, pod service, export worker, mock backend |
+| `packages/controller` | Hono API + SSE, pod service, export worker, forwarder management, mock backend |
+| `packages/forwarder` | Per-machine port forwarder (container image) |
 | `packages/web` | React SPA (TanStack Router and Query, Tailwind) |
 | `packages/cli` | `panem` command (citty); `serve` runs the controller |
 | `features/claude-code` | devcontainer Feature: context injection and Remote Control |
@@ -101,3 +130,5 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 - Cloning private repos inside a pod relies on DevPod forwarding the controller's git credentials during `up`.
 - Back up `~/.devpod` on the controller. If it is lost, re-add the machines; pods that DevPod lists again can be re-labelled with `panem rediscover`.
 - Using one Claude subscription on several machines at once: check Anthropic's terms.
+- **macOS hosts (Docker Desktop):** publishing on the Tailscale IP and reaching pod containers by their Docker IP need a real check.
+- **The forwarder mounts the Docker socket,** which is root-equivalent on that machine. It only reads the container list, and joins Docker networks of devcontainer-labelled containers.

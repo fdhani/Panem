@@ -12,12 +12,12 @@ install_packages() {
   if command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y --no-install-recommends git tmux jq curl ca-certificates
+    apt-get install -y --no-install-recommends git tmux jq curl socat ca-certificates
     rm -rf /var/lib/apt/lists/*
   elif command -v apk >/dev/null; then
-    apk add --no-cache git tmux jq curl ca-certificates bash
+    apk add --no-cache git tmux jq curl socat ca-certificates bash
   elif command -v dnf >/dev/null; then
-    dnf install -y git tmux jq curl ca-certificates
+    dnf install -y git tmux jq curl socat ca-certificates
   else
     echo "panem: unsupported base image (need apt, apk, or dnf)" >&2
     exit 1
@@ -25,7 +25,7 @@ install_packages() {
 }
 
 missing=0
-for bin in git tmux jq curl; do command -v "$bin" >/dev/null || missing=1; done
+for bin in git tmux jq curl socat; do command -v "$bin" >/dev/null || missing=1; done
 [ "$missing" = 1 ] && install_packages
 
 mkdir -p "$SHARE"
@@ -39,6 +39,9 @@ ENV
 
 mkdir -p /workspace
 chown "$REMOTE_USER" /workspace 2>/dev/null || true
+# Devcontainer tooling may remap the user's UID to the host's after this build step, which
+# would leave /workspace owned by a stale UID. Sticky + world-writable (like /tmp) avoids that.
+chmod 1777 /workspace
 
 if [ "$INSTALL_CLAUDE" = "true" ]; then
   # Install for the remote user so updates and ~/.local/bin land in their home.

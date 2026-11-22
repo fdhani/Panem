@@ -1,4 +1,4 @@
-import { AddMachineRequest, SummonRequest } from "@panem/core";
+import { AddMachineRequest, PortNumber, SetPortExposure, SummonRequest } from "@panem/core";
 import { BackendError } from "@panem/core";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -74,6 +74,10 @@ export function createApp(d: ApiDeps): Hono {
     return c.body(null, 204);
   });
 
+  app.post("/api/machines/:name/repair", async (c) =>
+    c.json(await service.repairMachine(c.req.param("name"))),
+  );
+
   app.get("/api/templates", async (c) => c.json(await d.templates.list()));
 
   app.get("/api/pods", (c) => c.json(service.podList()));
@@ -83,6 +87,12 @@ export function createApp(d: ApiDeps): Hono {
   );
   app.post("/api/pods/:id/stop", async (c) => c.json(await service.stop(c.req.param("id")), 202));
   app.post("/api/pods/:id/start", async (c) => c.json(await service.start(c.req.param("id")), 202));
+  app.put("/api/pods/:id/ports/:port", async (c) => {
+    const port = PortNumber.safeParse(c.req.param("port"));
+    if (!port.success) throw new HttpError(400, "invalid port");
+    const { exposed } = await body(c.req.raw, SetPortExposure);
+    return c.json(await service.setPortExposure(c.req.param("id"), port.data, exposed));
+  });
   app.post("/api/pods/:id/retry-export", async (c) => {
     const pod = await service.retryExport(c.req.param("id"));
     return c.json(pod ?? null, 202);

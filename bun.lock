@@ -51,6 +51,13 @@
         "zod": "3",
       },
     },
+    "packages/forwarder": {
+      "name": "@panem/forwarder",
+      "version": "0.2.0",
+      "dependencies": {
+        "@panem/core": "workspace:*",
+      },
+    },
     "packages/web": {
       "name": "@panem/web",
       "version": "0.1.0",
@@ -196,6 +203,8 @@
     "@panem/controller": ["@panem/controller@workspace:packages/controller"],
 
     "@panem/core": ["@panem/core@workspace:packages/core"],
+
+    "@panem/forwarder": ["@panem/forwarder@workspace:packages/forwarder"],
 
     "@panem/web": ["@panem/web@workspace:packages/web"],
 

@@ -7,9 +7,22 @@ set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
+if [ ! -w "$PANEM_WORKSPACE_ROOT" ]; then
+  # Image built before the user's UID was remapped: take ownership if sudo allows it.
+  sudo -n mkdir -p "$PANEM_WORKSPACE_ROOT" 2>/dev/null || true
+  sudo -n chown "$(id -u):$(id -g)" "$PANEM_WORKSPACE_ROOT" 2>/dev/null || true
+fi
+if [ ! -w "$PANEM_WORKSPACE_ROOT" ]; then
+  echo "[panem] $PANEM_WORKSPACE_ROOT is not writable by $(id -un) ($(id -u)): $(ls -ld "$PANEM_WORKSPACE_ROOT")" >&2
+  exit 1
+fi
+mkdir -p "$PANEM_STATE_DIR" "$CLAUDE_HOME"
+# Keep a log inside the pod: lifecycle output is otherwise easy to lose.
+exec > >(tee -a "$PANEM_STATE_DIR/post-create.log") 2>&1
+log "post-create start: user=$(id -un) pwd=$PWD pod_env=${PANEM_POD:+set}"
+
 POD="$(pod_json)"
 CONTEXT_DIR="${PANEM_CONTEXT_DIR:-$PWD}"
-mkdir -p "$PANEM_STATE_DIR" "$CLAUDE_HOME"
 
 # ---- 1. repos ----
 count="$(printf '%s' "$POD" | jq '.repos | length // 0')"
@@ -69,9 +82,13 @@ chmod 600 "$CLAUDE_JSON"
 # ---- 4. record pod metadata (used by controller rediscovery) ----
 printf '%s\n' "$POD" | jq '.' >"$PANEM_STATE_DIR/pod.json"
 
-# Persist the token for later starts: backends may not re-inject env on start.
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  mkdir -p "$HOME/.config/panem"
-  (umask 077 && printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$CLAUDE_CODE_OAUTH_TOKEN" >"$HOME/.config/panem/env")
-fi
+# Persist secrets for later starts: backends may not re-inject env on start.
+mkdir -p "$HOME/.config/panem"
+(
+  umask 077
+  : >"$HOME/.config/panem/env"
+  for var in CLAUDE_CODE_OAUTH_TOKEN PANEM_RELAY_SECRET; do
+    if [ -n "${!var:-}" ]; then printf '%s=%q\n' "$var" "${!var}" >>"$HOME/.config/panem/env"; fi
+  done
+)
 log "context ready"

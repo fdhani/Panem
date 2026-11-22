@@ -6,6 +6,9 @@ import {
   type BackendMachine,
   type BackendPod,
   type ExecResult,
+  type ForwarderState,
+  type ForwarderStatus,
+  PANEM_VERSION,
   type PodBackend,
   type UpOptions,
   claudeProjectDir,
@@ -129,4 +132,70 @@ export class MockBackend implements PodBackend {
 
 function fail(stderr: string): ExecResult {
   return { exitCode: 1, stdout: new Uint8Array(), stderr };
+}
+
+/**
+ * Fake forwarders for PANEM_BACKEND=mock: each running pod "listens" on its template's named
+ * ports plus 5173, 8000 and 5432, and ports are published once switched on.
+ */
+export class MockForwarders {
+  readonly enabled = true;
+  private blocks = new Map<string, number>();
+  private exposed = new Map<string, number[]>();
+  constructor(private readonly backend: MockBackend) {}
+
+  async linkHost(m: { host: string }) {
+    return m.host;
+  }
+
+  async state(m: { name: string }): Promise<ForwarderState> {
+    const pods = [...this.backend.pods.values()].filter((p) => p.machine === m.name);
+    return {
+      version: PANEM_VERSION,
+      unplaced: [],
+      pods: pods.map((p) => {
+        if (!this.blocks.has(p.id)) this.blocks.set(p.id, 7600 + this.blocks.size * 10);
+        const start = this.blocks.get(p.id)!;
+        const meta = JSON.parse(p.env.PANEM_POD ?? "{}") as { ports?: Record<string, string> };
+        const named = Object.keys(meta.ports ?? {}).map(Number);
+        const exposed = this.exposed.get(p.id) ?? named;
+        const running = p.status === "running";
+        const listening = [5173, 8000, 5432, ...named];
+        const all = [...new Set([...listening, ...exposed])].sort((a, b) => a - b);
+        return {
+          id: p.id,
+          block: [start, start + 9] as [number, number],
+          reachable: running,
+          unmapped: [],
+          ports: all.map((port) => {
+            const slot = exposed.includes(port) ? exposed.indexOf(port) + 1 : undefined;
+            return {
+              podPort: port,
+              name: meta.ports?.[String(port)],
+              live: running && listening.includes(port),
+              exposed: slot !== undefined,
+              slot,
+              hostPort: slot === undefined ? undefined : start + slot,
+            };
+          }),
+        };
+      }),
+    };
+  }
+
+  async setExposed(_m: unknown, podId: string, ports: number[]) {
+    this.exposed.set(
+      podId,
+      [...ports].sort((a, b) => a - b),
+    );
+  }
+
+  async ensure(): Promise<ForwarderStatus> {
+    return { status: "running", version: PANEM_VERSION };
+  }
+  async release(_m: unknown, podId: string) {
+    this.blocks.delete(podId);
+    this.exposed.delete(podId);
+  }
+  async remove() {}
 }

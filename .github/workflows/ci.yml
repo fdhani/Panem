@@ -15,6 +15,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
+      - run: sudo apt-get update && sudo apt-get install -y socat
       - run: bun install --frozen-lockfile
       - run: bun run lint
       - run: bun run typecheck
@@ -30,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - run: shellcheck features/claude-code/src/claude-code/install.sh features/claude-code/src/claude-code/scripts/*.sh
+      - run: shellcheck -x -P SCRIPTDIR features/claude-code/src/claude-code/install.sh features/claude-code/src/claude-code/scripts/*.sh
       - run: npm install -g @devcontainers/cli@0.72.0
       - run: devcontainer features test --project-folder features/claude-code --features claude-code --base-image mcr.microsoft.com/devcontainers/base:ubuntu
 
@@ -48,4 +49,8 @@ jobs:
             "https://github.com/loft-sh/devpod/releases/download/${DEVPOD_VERSION}/devpod-linux-amd64"
           chmod +x /usr/local/bin/devpod
           devpod version
+      - name: Build forwarder image
+        run: |
+          v=$(bun -e 'import { PANEM_VERSION } from "@panem/core"; console.log(PANEM_VERSION)')
+          docker build -f packages/forwarder/Dockerfile -t "ghcr.io/fdhani/panem/forwarder:$v" .
       - run: bun scripts/integration.ts

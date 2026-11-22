@@ -24,10 +24,18 @@ export const TemplateRepo = z.object({
 });
 export type TemplateRepo = z.infer<typeof TemplateRepo>;
 
+export const PortNumber = z.coerce.number().int().min(1).max(65535);
+
+/** Ports a template declares: pod port -> display name. Declared ports get the first slots. */
+export const PortNames = z.record(z.string().regex(/^\d{1,5}$/), z.string().min(1).max(40));
+
 export const Template = z.object({
   name: Slug,
   description: z.string().default(""),
   repos: z.array(TemplateRepo).min(1),
+  ports: PortNames.optional(),
+  /** Ports never exposed (e.g. debuggers, internal agents). */
+  ignorePorts: z.array(PortNumber).optional(),
   /** Path inside the workspace repo, relative to its root. Defaults to the template's .devcontainer folder. */
   devcontainerPath: z.string().min(1).optional(),
 });
@@ -36,6 +44,15 @@ export type Template = z.infer<typeof Template>;
 export const MachineStatus = z.enum(["online", "offline", "unknown"]);
 export type MachineStatus = z.infer<typeof MachineStatus>;
 
+export const ForwarderStatus = z.object({
+  status: z.enum(["running", "missing", "outdated", "error", "disabled"]),
+  version: z.string().optional(),
+  /** Address pod ports are published on (the machine's Tailscale IP). */
+  address: z.string().optional(),
+  error: z.string().optional(),
+});
+export type ForwarderStatus = z.infer<typeof ForwarderStatus>;
+
 export const Machine = z.object({
   /** DevPod provider name, e.g. m-vps. */
   name: z.string(),
@@ -43,6 +60,7 @@ export const Machine = z.object({
   host: z.string(),
   user: z.string().optional(),
   status: MachineStatus,
+  forwarder: ForwarderStatus.optional(),
 });
 export type Machine = z.infer<typeof Machine>;
 
@@ -68,13 +86,36 @@ export const PodMeta = z.object({
   /** Workspace repo commit the pod's context was taken from (base for 3-way export merge). */
   workspaceSha: z.string(),
   createdAt: z.string(),
+  ports: PortNames.optional(),
+  ignorePorts: z.array(PortNumber).optional(),
+  /**
+   * Ports switched on (published on the machine). Starts as the template's named ports;
+   * everything else stays closed until switched on.
+   */
+  exposePorts: z.array(PortNumber).optional(),
 });
 export type PodMeta = z.infer<typeof PodMeta>;
+
+/** A port inside a pod, as seen by its machine's forwarder. */
+export const PodServicePort = z.object({
+  podPort: z.number().int(),
+  name: z.string().optional(),
+  /** Something is listening on podPort right now. */
+  live: z.boolean(),
+  /** Switched on. hostPort/url are set once the forwarder has published it. */
+  exposed: z.boolean(),
+  hostPort: z.number().int().optional(),
+  url: z.string().optional(),
+});
+export type PodServicePort = z.infer<typeof PodServicePort>;
 
 export const Pod = PodMeta.extend({
   state: PodState,
   error: z.string().optional(),
   machineStatus: MachineStatus,
+  services: z.array(PodServicePort).default([]),
+  /** Slot 0: an index page listing the pod's services. */
+  indexUrl: z.string().optional(),
 });
 export type Pod = z.infer<typeof Pod>;
 
@@ -101,6 +142,18 @@ export const Config = z.object({
   devpodPath: z.string().default("devpod"),
   /** Extra listen addresses; the Tailscale IP is added automatically when found. */
   listen: z.array(z.string()).default(["127.0.0.1"]),
+  /** Shared by pod relays and forwarders. Port forwarding is off without it. */
+  relaySecret: z.string().min(16).optional(),
+  /** Bearer token for each machine's forwarder control API. */
+  forwarderToken: z.string().min(16).optional(),
+  forwarder: z
+    .object({
+      image: z.string().optional(),
+      portRange: z.tuple([PortNumber, PortNumber]).default([7600, 7699]),
+      controlPort: PortNumber.default(7599),
+      blockSize: z.number().int().min(2).max(100).default(10),
+    })
+    .default({}),
 });
 export type Config = z.infer<typeof Config>;
 
@@ -126,7 +179,44 @@ export const AddMachineRequest = z.object({
 });
 export type AddMachineRequest = z.infer<typeof AddMachineRequest>;
 
+export const SetPortExposure = z.object({ exposed: z.boolean() });
+export type SetPortExposure = z.infer<typeof SetPortExposure>;
+
 export type ServerEvent =
   | { type: "pods"; pods: Pod[] }
   | { type: "machines"; machines: Machine[] }
   | { type: "jobs"; jobs: Job[] };
+
+// ---- forwarder control API ----
+
+export const ForwarderPodState = z.object({
+  id: z.string(),
+  /** First and last host port of the pod's block. The first is the index page. */
+  block: z.tuple([z.number().int(), z.number().int()]),
+  /** Running and its relay answers. */
+  reachable: z.boolean(),
+  /** Every port the forwarder knows for this pod: listening, named, or switched on. */
+  ports: z.array(
+    z.object({
+      podPort: z.number().int(),
+      name: z.string().optional(),
+      /** Something is listening on it right now. */
+      live: z.boolean(),
+      /** Switched on: published on the machine (has a slot and host port). */
+      exposed: z.boolean(),
+      slot: z.number().int().optional(),
+      hostPort: z.number().int().optional(),
+    }),
+  ),
+  /** Exposed ports that didn't fit in the block. */
+  unmapped: z.array(z.number().int()).default([]),
+});
+export type ForwarderPodState = z.infer<typeof ForwarderPodState>;
+
+export const ForwarderState = z.object({
+  version: z.string(),
+  pods: z.array(ForwarderPodState),
+  /** Pods that found no free block. */
+  unplaced: z.array(z.string()).default([]),
+});
+export type ForwarderState = z.infer<typeof ForwarderState>;

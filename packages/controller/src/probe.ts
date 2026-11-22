@@ -78,3 +78,28 @@ export class StaticProbe implements HostProbe {
     return new Map(hosts.map((h) => [h.host, this.statuses[h.host] ?? "online"] as const));
   }
 }
+
+/** Map of lowercase short hostname -> Tailscale IPv4, from `tailscale status --json`. */
+export async function tailscalePeerIPs(): Promise<Map<string, string> | undefined> {
+  const r = await cmd(["tailscale", "status", "--json"], 5000);
+  if (r.code !== 0) return undefined;
+  try {
+    return parseTailscaleIPs(r.out);
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseTailscaleIPs(raw: string): Map<string, string> {
+  type Node = { HostName?: string; DNSName?: string; TailscaleIPs?: string[] };
+  const j = JSON.parse(raw) as { Self?: Node; Peer?: Record<string, Node> };
+  const m = new Map<string, string>();
+  for (const n of [j.Self, ...Object.values(j.Peer ?? {})]) {
+    const ip = n?.TailscaleIPs?.find((x) => /^\d+\.\d+\.\d+\.\d+$/.test(x));
+    if (!n || !ip) continue;
+    for (const name of [n.HostName, n.DNSName?.split(".")[0]]) {
+      if (name) m.set(name.toLowerCase(), ip);
+    }
+  }
+  return m;
+}
