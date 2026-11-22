@@ -1,0 +1,8 @@
+{
+  "without-claude": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+    "features": {
+      "claude-code": { "installClaude": false }
+    }
+  }
+}
