@@ -20,10 +20,7 @@ test.skipIf(!hasSocat)("end to end through socat relay-conn.sh", async () => {
   mkdirSync(join(ws, ".panem"));
   writeFileSync(join(ws, ".panem/pod.json"), JSON.stringify({ id: "real-aaaaaa", ports: {} }));
   const relayPort = await freePortRange(1);
-  const script = join(
-    import.meta.dir,
-    "../../../features/claude-code/src/claude-code/scripts/relay-conn.sh",
-  );
+  const script = join(import.meta.dir, "../../../features/src/panem/scripts/relay-conn.sh");
   procs.push(
     Bun.spawn(
       ["socat", `TCP-LISTEN:${relayPort},bind=127.0.0.7,fork,reuseaddr`, `SYSTEM:${script}`],
@@ -31,7 +28,7 @@ test.skipIf(!hasSocat)("end to end through socat relay-conn.sh", async () => {
         env: {
           ...process.env,
           PANEM_RELAY_SECRET: SECRET,
-          PANEM_WORKSPACE_ROOT: ws,
+          PANEM_STATE_DIR: join(ws, ".panem"),
           PANEM_RELAY_PORT: String(relayPort),
         },
         stderr: "ignore",

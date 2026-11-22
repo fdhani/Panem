@@ -7,6 +7,7 @@ import {
   machineProviderName,
   newPodId,
   primaryRepo,
+  repoPath,
   resolveRefs,
 } from "../src";
 
@@ -45,7 +46,8 @@ describe("core", () => {
   });
 
   test("claude project dir matches Claude Code's scheme", () => {
-    expect(claudeProjectDir("/workspace/api")).toBe("-workspace-api");
+    expect(claudeProjectDir("/codebase/api")).toBe("-codebase-api");
+    expect(repoPath("api")).toBe("/codebase/api");
   });
 
   test("ids and names", () => {

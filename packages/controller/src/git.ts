@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export class GitError extends Error {
@@ -61,16 +61,42 @@ export class WorkspaceRepo {
     readonly branch: string,
   ) {}
 
-  /** Fetch and reset to origin. Caller must hold the lock. */
+  /**
+   * Fetch and reset to origin. Caller must hold the lock. Returns HEAD, or "" while the branch
+   * has no commits yet (a brand-new, empty repo is a valid sync source: the first export
+   * creates its first commit).
+   */
   async syncUnlocked(): Promise<string> {
     if (!existsSync(`${this.dir}/.git`)) {
       await mkdir(dirname(this.dir), { recursive: true });
-      await git(dirname(this.dir), ["clone", "--branch", this.branch, "--", this.url, this.dir]);
+      const r = await git(
+        dirname(this.dir),
+        ["clone", "--branch", this.branch, "--", this.url, this.dir],
+        false,
+      );
+      if (r.code !== 0) {
+        if (!isMissingBranch(r.stderr))
+          throw new GitError(`git clone failed: ${lastLine(r.stderr)}`, r.stderr);
+        // Empty remote (or no such branch yet): start the branch locally.
+        await rm(this.dir, { recursive: true, force: true });
+        await git(dirname(this.dir), ["clone", "--", this.url, this.dir]);
+        await git(this.dir, ["symbolic-ref", "HEAD", `refs/heads/${this.branch}`]);
+      }
       await git(this.dir, ["config", "user.name", "panem"]);
       await git(this.dir, ["config", "user.email", "panem@localhost"]);
     } else {
-      await git(this.dir, ["fetch", "--quiet", "origin", this.branch]);
-      await git(this.dir, ["reset", "--quiet", "--hard", `origin/${this.branch}`]);
+      const f = await git(this.dir, ["fetch", "--quiet", "origin", this.branch], false);
+      if (f.code === 0) {
+        await git(this.dir, ["reset", "--quiet", "--hard", `origin/${this.branch}`]);
+      } else if (!isMissingBranch(f.stderr)) {
+        throw new GitError(`git fetch failed: ${lastLine(f.stderr)}`, f.stderr);
+      } else if (await this.headUnlocked()) {
+        // The branch vanished upstream: drop local commits too, to mirror the remote.
+        await git(this.dir, ["checkout", "--quiet", "--orphan", `panem-empty-${Date.now()}`]);
+        await git(this.dir, ["rm", "-rfq", "--cached", "."], false);
+        await git(this.dir, ["branch", "-D", this.branch], false);
+        await git(this.dir, ["checkout", "--quiet", "--orphan", this.branch]);
+      }
       await git(this.dir, ["clean", "-fdq"]);
     }
     this.lastSync = Date.now();
@@ -87,8 +113,22 @@ export class WorkspaceRepo {
     });
   }
 
+  /** HEAD commit, or "" on a branch with no commits yet. */
   async headUnlocked(): Promise<string> {
-    return (await git(this.dir, ["rev-parse", "HEAD"])).stdout.trim();
+    const r = await git(this.dir, ["rev-parse", "--verify", "--quiet", "HEAD"], false);
+    return r.code === 0 ? r.stdout.trim() : "";
+  }
+
+  /** File bytes at a commit, or undefined if missing (or no commit). */
+  async showBytes(sha: string, path: string): Promise<Uint8Array | undefined> {
+    if (!sha) return undefined;
+    const p = Bun.spawn(["git", "show", `${sha}:${path}`], {
+      cwd: this.dir,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const [out, code] = await Promise.all([new Response(p.stdout).bytes(), p.exited]);
+    return code === 0 ? out : undefined;
   }
 
   /** File contents at a commit, or undefined if missing (or commit unknown). */
@@ -97,4 +137,14 @@ export class WorkspaceRepo {
     const r = await git(this.dir, ["show", `${sha}:${path}`], false);
     return r.code === 0 ? r.stdout : undefined;
   }
+}
+
+function isMissingBranch(stderr: string): boolean {
+  return /not found in upstream|couldn't find remote ref|Remote branch .* not found|empty repository/i.test(
+    stderr,
+  );
+}
+
+function lastLine(s: string): string {
+  return s.trim().split("\n").at(-1) ?? "";
 }

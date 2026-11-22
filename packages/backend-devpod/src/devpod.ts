@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackendMachine, BackendPod, ExecResult, PodBackend, UpOptions } from "@panem/core";
-import { BackendError } from "@panem/core";
+import { BackendError, LEGACY_POD_STATE_DIR } from "@panem/core";
 import { run, text } from "./run";
 
 /** DevPod version this backend is tested against. Bump together with the CI integration test. */
@@ -10,14 +10,33 @@ export const DEVPOD_VERSION = "v0.6.15";
 
 /** Where the claude-code Feature installs its hooks inside the pod. */
 const HOOKS = "/usr/local/share/panem";
-/** First boot: one-time setup unless pod.json shows it already ran, then the start hook. */
+/**
+ * First boot: the one-time setup, unless pod.json shows it already ran. The start hook runs
+ * separately (runHook), after the controller has copied synced files in.
+ */
 export const BOOTSTRAP_CREATE = [
   `if [ -x ${HOOKS}/post-create.sh ]; then`,
-  `  if [ ! -f /workspace/.panem/pod.json ]; then ${HOOKS}/post-create.sh || exit $?; fi;`,
-  `  ${HOOKS}/post-start.sh;`,
+  // pod.json marks setup as done: ~/.panem today, /workspace/.panem before the rename.
+  `  if [ ! -f "$HOME/.panem/pod.json" ] && [ ! -f ${LEGACY_POD_STATE_DIR}/pod.json ]; then ${HOOKS}/post-create.sh || exit $?; fi;`,
   "fi",
 ].join(" ");
 export const BOOTSTRAP_START = `if [ -x ${HOOKS}/post-start.sh ]; then ${HOOKS}/post-start.sh; fi`;
+
+/** Exit code the stdin upload uses when fewer bytes arrived than were sent. */
+export const STDIN_SHORT = 97;
+/** Base64 characters per exec call in the chunked fallback (well under command-line limits). */
+const UPLOAD_CHUNK = 48 * 1024;
+
+/** Receive exactly `len` bytes on stdin into a temp file, then feed them to `command`. */
+export function stdinUploadScript(len: number, command: string): string {
+  return [
+    't="$(mktemp)"',
+    'cat > "$t"',
+    `n="$(wc -c < "$t" | tr -d ' ')"`,
+    `if [ "$n" != "${len}" ]; then rm -f "$t"; echo "panem: upload got $n of ${len} bytes" >&2; exit ${STDIN_SHORT}; fi`,
+    `( ${command} ) < "$t"; rc=$?; rm -f "$t"; exit $rc`,
+  ].join("; ");
+}
 
 /** Provider names the controller owns. Other DevPod providers are left alone. */
 export const MACHINE_PREFIX = "m-";
@@ -45,8 +64,8 @@ export class DevPodBackend implements PodBackend {
     this.statusTimeoutMs = opts.statusTimeoutMs ?? 20_000;
   }
 
-  private run(args: string[], timeoutMs?: number, check = true) {
-    return run(this.bin, args, { env: this.env, timeoutMs, check });
+  private run(args: string[], timeoutMs?: number, check = true, stdin?: Uint8Array) {
+    return run(this.bin, args, { env: this.env, timeoutMs, check, stdin });
   }
 
   /** Returns the installed version and whether it matches the pinned one. */
@@ -153,8 +172,60 @@ export class DevPodBackend implements PodBackend {
   }
 
   async exec(id: string, command: string): Promise<ExecResult> {
-    const res = await this.run(["ssh", id, "--command", command], 10 * 60_000, false);
+    // Long enough for before-destroy hooks (each has its own, shorter limit in the pod).
+    const res = await this.run(["ssh", id, "--command", command], 30 * 60_000, false);
     return { exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr };
+  }
+
+  async runHook(id: string, hook: "start"): Promise<void> {
+    await this.lifecycle(id, hook);
+  }
+
+  /** Whether `devpod ssh --command` passes stdin through; learned on first upload. */
+  private stdinWorks: boolean | undefined;
+
+  /**
+   * Pipe `data` into `command` in the pod. Tries stdin through `devpod ssh` first, with the byte
+   * count checked in the pod. If the bytes don't arrive, falls back to base64 chunks sent over
+   * ordinary exec calls, and remembers which way works.
+   */
+  async upload(id: string, data: Uint8Array, command: string): Promise<ExecResult> {
+    if (this.stdinWorks !== false) {
+      const res = await this.run(
+        ["ssh", id, "--command", stdinUploadScript(data.length, command)],
+        10 * 60_000,
+        false,
+        data,
+      );
+      if (res.exitCode !== STDIN_SHORT) {
+        this.stdinWorks = true;
+        return { exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr };
+      }
+      this.stdinWorks = false;
+    }
+    return this.chunkedUpload(id, data, command);
+  }
+
+  private async chunkedUpload(id: string, data: Uint8Array, command: string): Promise<ExecResult> {
+    const tmp = `/tmp/panem-upload-${crypto.randomUUID()}`;
+    const b64 = Buffer.from(data).toString("base64");
+    const step = async (cmd: string) => {
+      const r = await this.exec(id, cmd);
+      if (r.exitCode !== 0) throw new BackendError(`upload to ${id} failed: ${r.stderr.trim()}`);
+    };
+    try {
+      await step(`: > ${tmp}.b64`);
+      for (let i = 0; i < b64.length; i += UPLOAD_CHUNK) {
+        await step(`printf %s '${b64.slice(i, i + UPLOAD_CHUNK)}' >> ${tmp}.b64`);
+      }
+      return await this.exec(
+        id,
+        `base64 -d ${tmp}.b64 > ${tmp} && rm -f ${tmp}.b64 && { ( ${command} ) < ${tmp}; rc=$?; rm -f ${tmp}; exit $rc; }`,
+      );
+    } catch (e) {
+      await this.exec(id, `rm -f ${tmp} ${tmp}.b64`).catch(() => {});
+      throw e;
+    }
   }
 
   /**

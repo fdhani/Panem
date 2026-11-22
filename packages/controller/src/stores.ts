@@ -4,7 +4,7 @@ import { Mutex } from "./git";
 
 /**
  * Controller-side cache of pod metadata. DevPod owns pod existence; this only adds template,
- * refs, and base commit. It can be rebuilt from each pod's /workspace/.panem/pod.json.
+ * refs, and base commit. It can be rebuilt from each pod's ~/.panem/pod.json.
  */
 export class PodStore {
   private pods = new Map<string, PodMeta>();

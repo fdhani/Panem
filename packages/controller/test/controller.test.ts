@@ -154,7 +154,7 @@ describe("delete and export", () => {
     expect(mem).toContain("- pod fact");
     expect(mem).not.toContain("<<<<<<<");
     expect(ws.read("memory/web/notes/ui.md")).toBe("dark mode\n");
-    expect(ws.log().split("\n")[0]).toBe(`panem: export memory from ${pod.id}`);
+    expect(ws.log().split("\n")[0]).toBe(`panem: save memory from ${pod.id}`);
   });
 
   test("two pods exporting the same file keep both sets of lines", async () => {
@@ -231,7 +231,7 @@ describe("delete and export", () => {
     expect(ctl.service.get(pod.id).machineStatus).toBe("offline");
     const res = await ctl.req("DELETE", `/api/pods/${pod.id}`);
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toContain("force");
+    expect(((await res.json()) as { error: string }).error).toContain("Force delete");
     expect((await ctl.req("DELETE", `/api/pods/${pod.id}?force=true`)).status).toBe(204);
     expect(ctl.service.podList()).toEqual([]);
     expect(ws.log()).toBe("seed\n");

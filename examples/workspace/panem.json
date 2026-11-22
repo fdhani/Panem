@@ -1,0 +1,9 @@
+{
+  "sources": {},
+  "sync": [
+    {
+      "preset": "claude-code"
+    }
+  ],
+  "exclude": ["**/.DS_Store"]
+}

@@ -1,9 +1,12 @@
 import {
   type AddMachineRequest,
+  AgentInfo,
   type BackendPod,
+  DEFAULT_TEMPLATE_ENV,
   type ForwarderState,
   type ForwarderStatus,
   type Job,
+  LEGACY_AGENTS,
   type Machine,
   type MachineStatus,
   PANEM_VERSION,
@@ -11,18 +14,24 @@ import {
   type PodBackend,
   PodMeta,
   type PodState,
+  READ_POD_JSON,
   type ServerEvent,
   type SummonRequest,
   devcontainerPathFor,
   machineProviderName,
   newPodId,
   resolveRefs,
+  resolveSync,
 } from "@panem/core";
-import { exportMemory } from "./exporter";
+import { z } from "zod";
+import { exportPod } from "./exporter";
 import type { Forwarders, MachineRef } from "./forwarders";
 import type { WorkspaceRepo } from "./git";
+import { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";
 import type { HostProbe } from "./probe";
+import type { Sources } from "./sources";
 import type { JobStore, PodStore } from "./stores";
+import { syncIn } from "./sync-in";
 import type { Templates } from "./templates";
 
 export class HttpError extends Error {
@@ -46,9 +55,13 @@ export interface ServiceDeps {
   pods: PodStore;
   jobs: JobStore;
   probe: HostProbe;
-  claudeOauthToken?: string;
+  /** Agent credentials by env var name, read fresh at each summon (so `panem env set` applies). */
+  credentials?: () => Promise<Record<string, string>> | Record<string, string>;
   relaySecret?: string;
   forwarders?: Forwarders;
+  sources: Sources;
+  /** Time limit for each before-destroy hook, in seconds (default 600). */
+  hookTimeoutSec?: number;
   log?: (msg: string) => void;
 }
 
@@ -369,7 +382,11 @@ export class PodService {
   private toPod(meta: PodMeta): Pod {
     const op = this.ops.get(meta.id);
     const machineStatus = this.machineStatus(meta.machine);
-    const ports = this.servicesFor(meta);
+    const ports = {
+      ...this.servicesFor(meta),
+      // Pods from before agents were pluggable always had Claude Code.
+      agents: meta.agents ?? LEGACY_AGENTS,
+    };
     if (op) return { ...meta, ...ports, state: op.state, error: op.error, machineStatus };
     const job = this.d.jobs.forPod(meta.id);
     if (job?.status === "failed") {
@@ -408,8 +425,14 @@ export class PodService {
   }
 
   async summon(req: SummonRequest): Promise<Pod> {
-    const template = await this.d.templates.get(req.template);
+    const { template, panem } = await this.d.templates.getWithConfig(req.template);
     if (!template) throw new HttpError(404, `template ${req.template} not found`);
+    let sync: PodMeta["sync"];
+    try {
+      sync = resolveSync(panem, template);
+    } catch (e) {
+      throw new HttpError(400, msg(e));
+    }
     const machines = await this.refreshMachines();
     const machine = machines.find((m) => m.name === req.machine);
     if (!machine) throw new HttpError(404, `machine ${req.machine} not registered`);
@@ -433,12 +456,21 @@ export class PodService {
       exposePorts: Object.keys(template.ports ?? {})
         .map(Number)
         .sort((a, b) => a - b),
+      sync,
+      hooks: template.hooks,
     });
     await this.d.pods.put(meta);
     this.setOp(meta.id, { state: "creating" });
 
     const env: Record<string, string> = { PANEM_POD: JSON.stringify(meta) };
-    if (this.d.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.d.claudeOauthToken;
+    // Only the credentials this template opted in to (default: the Claude token, as before).
+    const creds = (await this.d.credentials?.()) ?? {};
+    const wanted = template.env ?? DEFAULT_TEMPLATE_ENV;
+    for (const name of wanted) {
+      if (creds[name]) env[name] = creds[name];
+      else this.log(`${meta.id}: template ${template.name} wants ${name}, which isn't configured`);
+    }
+    env.PANEM_AGENT_ENV = wanted.join(",");
     if (this.d.relaySecret) env.PANEM_RELAY_SECRET = this.d.relaySecret;
     void this.d.backend
       .up({
@@ -449,6 +481,10 @@ export class PodService {
         devcontainerPath: devcontainerPathFor(template),
         env,
       })
+      // Setup has run; place synced files before the start hook launches the agent.
+      .then(() => this.syncIntoPod(meta))
+      .then(() => this.d.backend.runHook(meta.id, "start"))
+      .then(() => this.recordAgents(meta.id))
       .then(
         () => {
           this.lastStatus.set(meta.id, "running");
@@ -462,6 +498,49 @@ export class PodService {
         },
       );
     return this.get(meta.id);
+  }
+
+  /**
+   * Agents' before-destroy.sh, then the template's beforeDestroy command, in the pod. They push
+   * whatever else should outlive it (e.g. overlay work) straight to its repo. A failure stops
+   * the delete and keeps the pod (Retry, or Delete without saving).
+   */
+  private async runBeforeDestroy(meta: PodMeta): Promise<void> {
+    const r = await this.d.backend.exec(
+      meta.id,
+      bashCommand(BEFORE_DESTROY_SCRIPT, "panem-before-destroy", [
+        this.d.hookTimeoutSec ?? 600,
+        meta.hooks?.beforeDestroy ?? "",
+      ]),
+    );
+    if (r.exitCode !== 0) {
+      const lines = r.stderr.trim().split("\n").filter(Boolean);
+      const reason = lines.at(-1)?.replace(/^panem: /, "") ?? "before-destroy hook failed";
+      const output = lines.slice(-6, -1).join(" | ");
+      throw new Error(output ? `${reason}: ${output}` : reason);
+    }
+  }
+
+  /** Which agents the pod has and how to reach them (~/.panem/agents.json, from the base). */
+  private async recordAgents(id: string): Promise<void> {
+    const r = await this.d.backend.exec(id, `cat "$HOME/.panem/agents.json"`);
+    if (r.exitCode !== 0) return; // a Feature from before agents were pluggable: see toPod
+    try {
+      const agents = z.array(AgentInfo).parse(JSON.parse(new TextDecoder().decode(r.stdout)));
+      const current = this.d.pods.get(id);
+      if (current) await this.d.pods.put({ ...current, agents });
+    } catch (e) {
+      this.log(`${id}: unreadable agents.json: ${msg(e)}`);
+    }
+  }
+
+  /** Copy synced files in and record what was sent (the export's merge bases). */
+  private async syncIntoPod(meta: PodMeta): Promise<void> {
+    const r = await syncIn({ backend: this.d.backend, sources: this.d.sources }, meta);
+    const current = this.d.pods.get(meta.id) ?? meta;
+    await this.d.pods.put({ ...current, workspaceSha: r.workspaceSha });
+    for (const n of r.notes) this.log(`${meta.id}: ${n}`);
+    this.log(`synced ${r.files} file(s) into ${meta.id}`);
   }
 
   private upsertBackend(p: BackendPod) {
@@ -509,10 +588,15 @@ export class PodService {
   }
 
   /**
-   * Delete = export memory, then remove. Offline machines block delete unless forced;
-   * force skips export and discards the pod's memory.
+   * Delete = before-destroy hooks, then (unless `saveMemory` is false) save agent memory, then
+   * remove. Hooks always run; only `force` skips them, along with the memory save. It's for when
+   * hooks can't run: the machine is offline, or a hook keeps failing.
    */
-  async delete(id: string, force = false): Promise<Pod | undefined> {
+  async delete(
+    id: string,
+    opts: { force?: boolean; saveMemory?: boolean } = {},
+  ): Promise<Pod | undefined> {
+    const force = opts.force ?? false;
     const pod = this.get(id);
     const op = this.ops.get(id);
     if (op && op.state !== "error" && !force) {
@@ -526,19 +610,26 @@ export class PodService {
     if (pod.machineStatus === "offline") {
       throw new HttpError(
         409,
-        "machine is offline: memory can't be exported. Use force delete to discard it.",
+        "machine is offline, so before-destroy hooks can't run and memory can't be saved. Force delete to remove it anyway.",
       );
     }
     const existing = this.d.jobs.forPod(id);
     const now = new Date().toISOString();
     const job: Job = existing
-      ? { ...existing, status: "pending", error: undefined, updatedAt: now }
+      ? {
+          ...existing,
+          status: "pending",
+          error: undefined,
+          saveMemory: opts.saveMemory ?? existing.saveMemory,
+          updatedAt: now,
+        }
       : {
           id: `job-${id}-${Date.now()}`,
           kind: "export-delete",
           podId: id,
           status: "pending",
           attempts: 0,
+          saveMemory: opts.saveMemory ?? true,
           createdAt: now,
           updatedAt: now,
         };
@@ -612,12 +703,18 @@ export class PodService {
           await this.d.backend.start(meta.id);
         }
         this.setOp(meta.id, { state: "exporting" });
-        const r = await exportMemory(this.d.backend, this.d.repo, meta);
-        this.log(
-          r.commit
-            ? `exported ${r.files.length} memory file(s) from ${meta.id} (${r.commit.slice(0, 8)})`
-            : `no memory changes in ${meta.id}`,
-        );
+        await this.runBeforeDestroy(meta);
+        if (job.saveMemory) {
+          const r = await exportPod({ backend: this.d.backend, repo: this.d.repo }, meta);
+          for (const n of r.notes) this.log(`${meta.id}: ${n}`);
+          this.log(
+            r.files.length
+              ? `saved ${r.files.length} memory file(s) from ${meta.id} (${r.commit?.slice(0, 8)})`
+              : `no memory changes in ${meta.id}`,
+          );
+        } else {
+          this.log(`deleting ${meta.id} without saving memory`);
+        }
       }
       this.setOp(job.podId, { state: "deleting" });
       await this.d.backend.delete(job.podId);
@@ -648,7 +745,7 @@ export class PodService {
       if (this.d.pods.get(b.id)) continue;
       try {
         if (b.status !== "running") throw new Error("not running");
-        const r = await this.d.backend.exec(b.id, "cat /workspace/.panem/pod.json");
+        const r = await this.d.backend.exec(b.id, READ_POD_JSON);
         if (r.exitCode !== 0) throw new Error(r.stderr);
         const meta = PodMeta.parse({
           ...JSON.parse(new TextDecoder().decode(r.stdout)),

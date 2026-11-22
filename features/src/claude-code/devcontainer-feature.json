@@ -1,0 +1,35 @@
+{
+  "id": "claude-code",
+  "version": "0.3.0",
+  "name": "Claude Code (Panem agent)",
+  "description": "Claude Code as a Panem agent: installs Claude Code, trusts the pod's repos, and keeps a Remote Control session running (open it in the Claude app). Brings the Panem pod base along if the template doesn't list it.",
+  "documentationURL": "https://github.com/fdhani/panem/tree/main/features",
+  "options": {
+    "installClaude": {
+      "type": "boolean",
+      "default": true,
+      "description": "Install Claude Code with the native installer. Set false if the image already has it."
+    },
+    "remoteControl": {
+      "type": "boolean",
+      "default": true,
+      "description": "Start `claude remote-control` in tmux on every container start."
+    },
+    "permissionMode": {
+      "type": "string",
+      "enum": ["default", "acceptEdits", "auto", "plan", "bypassPermissions"],
+      "default": "default",
+      "description": "Permission mode for sessions started through Remote Control."
+    }
+  },
+  "containerEnv": {
+    "PANEM_CODE_ROOT": "/codebase"
+  },
+  "postCreateCommand": "/usr/local/share/panem/post-create.sh",
+  "postStartCommand": "/usr/local/share/panem/post-start.sh",
+  "installsAfter": [
+    "ghcr.io/fdhani/panem/panem",
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/devcontainers/features/git"
+  ]
+}

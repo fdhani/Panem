@@ -1,54 +1,112 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
-import { type PodBackend, type PodMeta, claudeProjectDir, repoPath } from "@panem/core";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+  type Mapping,
+  type PodBackend,
+  type PodMeta,
+  type ResolvedSync,
+  expandRules,
+  exportRoots,
+  legacyPodPath,
+  mapOut,
+  resolveSync,
+} from "@panem/core";
 import { type WorkspaceRepo, git } from "./git";
-import { unionMerge } from "./merge";
+import { mergeFile } from "./merge";
+import { EXPORT_SCRIPT, bashCommand } from "./pod/scripts";
+import { listFiles } from "./sources";
 
-/**
- * Runs inside the pod. Prints a base64 tarball of every file in a memory/ folder under Claude's
- * projects folder (base64 because the SSH transport isn't guaranteed binary-safe).
- */
-export const EXPORT_COMMAND = [
-  'd="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"',
-  '[ -d "$d" ] || exit 0',
-  'cd "$d"',
-  // tar writes to a file (not a pipe) so a tar failure fails the whole command instead of
-  // looking like "no memory" and letting the pod be deleted.
-  't="$(mktemp)"',
-  "find . -path '*/memory/*' -type f -print0 | tar --null -czf \"$t\" -T -",
-  "base64 \"$t\" | tr -d '\\n'",
-  'rm -f "$t"',
-].join(" && ");
+/** Export limits: memory is small; anything bigger is a mistake worth a clear error. */
+export const EXPORT_MAX_BYTES = 50 * 1024 * 1024;
+export const EXPORT_MAX_FILES = 5000;
 
-export interface ExportResult {
-  /** Files changed in the workspace repo, relative to its root. */
-  files: string[];
-  commit?: string;
+/** Pod root ("~/x") as an export.sh argument ("h:x"). */
+export function exportArg(root: string): string {
+  if (root.startsWith("~/")) return `h:${root.slice(2)}`;
+  throw new Error(`agent memory must be under ~/: ${root}`);
 }
 
-/** Pull memory out of the pod and push it to the workspace repo. Retries on push races. */
-export async function exportMemory(
-  backend: PodBackend,
-  repo: WorkspaceRepo,
+export function exportCommand(
+  roots: string[],
+  limits: { maxBytes?: number; maxFiles?: number } = {},
+): string {
+  return bashCommand(EXPORT_SCRIPT, "panem-export", [
+    limits.maxBytes ?? EXPORT_MAX_BYTES,
+    limits.maxFiles ?? EXPORT_MAX_FILES,
+    ...roots.map(exportArg),
+  ]);
+}
+
+/** Sync of a pod created before sync rules existed: the defaults. */
+export function syncOf(pod: PodMeta): ResolvedSync {
+  return pod.sync ?? resolveSync(undefined, { name: pod.template });
+}
+
+/** Whether deleting this pod saves anything (it has agent memory to save). */
+export function hasMemory(pod: PodMeta): boolean {
+  return syncOf(pod).rules.some((r) => r.memory);
+}
+
+/** "~/.claude/projects/-workspace-api/..." (pods from before the rename) -> "-codebase-api". */
+function fromLegacy(p: string): string {
+  return p.replace(/^~\/\.claude\/projects\/-workspace-/, "~/.claude/projects/-codebase-");
+}
+
+export interface ExportResult {
+  /** Memory files changed in the workspace repo, relative to its root. */
+  files: string[];
+  commit?: string;
+  /** Files whose pod version wasn't used (binary changed on both sides). */
+  notes: string[];
+}
+
+interface PodFile extends Mapping {
+  /** Where the pod's copy was unpacked on the controller. */
+  local: string;
+}
+
+/**
+ * Save the pod's agent memory into the workspace repo: union-merge each file against the
+ * commit the pod was given, then commit and push (retrying push races). Nothing else is ever
+ * written back; work other than memory is pushed by the pod's before-destroy hooks.
+ */
+export async function exportPod(
+  d: { backend: PodBackend; repo: WorkspaceRepo },
   pod: PodMeta,
-  opts: { attempts?: number } = {},
+  opts: { attempts?: number; maxBytes?: number; maxFiles?: number } = {},
 ): Promise<ExportResult> {
-  const res = await backend.exec(pod.id, EXPORT_COMMAND);
+  const sync = syncOf(pod);
+  const rules = expandRules(
+    sync.rules,
+    pod.repos.map((r) => r.name),
+  );
+  const roots = exportRoots(rules);
+  if (roots.length === 0) return { files: [], notes: [] };
+  const withLegacy = [
+    ...roots,
+    ...roots.map(legacyPodPath).filter((x): x is string => x !== undefined),
+  ];
+
+  const res = await d.backend.exec(pod.id, exportCommand(withLegacy, opts));
   if (res.exitCode !== 0) {
-    throw new Error(`reading memory from pod failed: ${res.stderr.trim().split("\n").at(-1)}`);
+    throw new Error(`reading memory from the pod failed: ${res.stderr.trim().split("\n").at(-1)}`);
   }
   const tmp = await mkdtemp(join(tmpdir(), "panem-export-"));
   try {
-    const files = await unpack(new TextDecoder().decode(res.stdout).trim(), tmp);
-    const mapped = mapToWorkspace(files, pod);
-    if (mapped.length === 0) return { files: [] };
+    const files = await unpack(new TextDecoder().decode(res.stdout), tmp);
+    const byPath = new Map(files.map((f) => [fromLegacy(f.podPath), f.local]));
+    const mapped: PodFile[] = mapOut(rules, [...byPath.keys()], sync.exclude).map((m) => ({
+      ...m,
+      local: byPath.get(m.dest)!,
+    }));
+    if (mapped.length === 0) return { files: [], notes: [] };
 
-    const attempts = opts.attempts ?? 3;
     let lastErr: unknown;
-    for (let i = 0; i < attempts; i++) {
+    for (let i = 0; i < (opts.attempts ?? 3); i++) {
       try {
-        return await repo.lock.run(() => applyAndPush(repo, pod, tmp, mapped));
+        return await d.repo.lock.run(() => applyAndPush(d.repo, pod, mapped));
       } catch (e) {
         lastErr = e;
         if (!isPushRace(e)) break;
@@ -60,75 +118,74 @@ export async function exportMemory(
   }
 }
 
-async function unpack(b64: string, dir: string): Promise<string[]> {
-  if (!b64) return [];
-  const tgz = join(dir, "memory.tgz");
-  await writeFile(tgz, Buffer.from(b64, "base64"));
-  const out = join(dir, "x");
-  await mkdir(out);
-  const p = Bun.spawn(["tar", "-xzf", tgz, "-C", out], { stderr: "pipe" });
+/** Decode export.sh output ($HOME line, code-root line, base64 tar) into pod paths. */
+async function unpack(out: string, dir: string): Promise<{ podPath: string; local: string }[]> {
+  const [home, , b64 = ""] = out.split("\n");
+  const data = b64.trim();
+  if (!home || !data) return [];
+  const tgz = join(dir, "export.tgz");
+  await writeFile(tgz, Buffer.from(data, "base64"));
+  const x = join(dir, "x");
+  await mkdir(x);
+  const p = Bun.spawn(["tar", "-xzf", tgz, "-C", x], { stderr: "pipe" });
   if ((await p.exited) !== 0) {
-    throw new Error(`could not unpack memory: ${await new Response(p.stderr).text()}`);
+    throw new Error(`could not unpack memory from the pod: ${await new Response(p.stderr).text()}`);
   }
-  return (await walk(out)).map((f) => relative(out, f));
+  const files: { podPath: string; local: string }[] = [];
+  for (const rel of await listFiles(x)) {
+    const abs = `/${rel}`;
+    if (abs.startsWith(`${home}/`)) {
+      files.push({ podPath: `~/${abs.slice(home.length + 1)}`, local: join(x, rel) });
+    }
+  }
+  return files;
 }
 
-async function walk(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  for (const e of await readdir(dir, { withFileTypes: true })) {
-    const p = join(dir, e.name);
-    if (e.isDirectory()) out.push(...(await walk(p)));
-    else if (e.isFile()) out.push(p);
-  }
-  return out;
-}
-
-/** "-workspace-api/memory/MEMORY.md" -> "memory/api/MEMORY.md", only for the pod's own repos. */
-export function mapToWorkspace(files: string[], pod: PodMeta): { src: string; dest: string }[] {
-  const byProject = new Map(pod.repos.map((r) => [claudeProjectDir(repoPath(r.name)), r.name]));
-  const out: { src: string; dest: string }[] = [];
-  for (const f of files) {
-    const [project, mem, ...rest] = f.replace(/^\.\//, "").split("/");
-    const repoName = project ? byProject.get(project) : undefined;
-    if (!repoName || mem !== "memory" || rest.length === 0) continue;
-    if (rest.some((s) => s === ".." || s === "")) continue;
-    out.push({ src: join("x", f), dest: join("memory", repoName, ...rest) });
-  }
-  return out;
+/** Keep writes inside the repo, whatever a path says. */
+function inside(root: string, rel: string): string {
+  const base = resolve(root);
+  const p = resolve(base, rel);
+  if (!p.startsWith(base + sep)) throw new Error(`path escapes the workspace repo: ${rel}`);
+  return p;
 }
 
 async function applyAndPush(
   repo: WorkspaceRepo,
   pod: PodMeta,
-  tmp: string,
-  mapped: { src: string; dest: string }[],
+  files: PodFile[],
 ): Promise<ExportResult> {
   await repo.syncUnlocked();
   const changed: string[] = [];
-  for (const { src, dest } of mapped) {
-    const podText = await readFile(join(tmp, src), "utf8");
-    const destPath = join(repo.dir, dest);
-    const current = await readFile(destPath, "utf8").catch(() => undefined);
-    const base = await repo.show(pod.workspaceSha, dest);
-    const merged = await unionMerge(current, base, podText);
-    if (merged !== current) {
-      await mkdir(dirname(destPath), { recursive: true });
-      await writeFile(destPath, merged);
-      changed.push(dest);
+  const notes: string[] = [];
+  for (const f of files) {
+    const dest = inside(repo.dir, f.src);
+    if (relative(repo.dir, dest).split(sep)[0] === ".git") continue;
+    const current = existsSync(dest) ? await readBytes(dest) : undefined;
+    const base = await repo.showBytes(pod.workspaceSha, f.src);
+    const out = await mergeFile(current, base, await readBytes(f.local));
+    if (out.note) notes.push(`${f.src}: ${out.note}`);
+    if (out.content) {
+      await mkdir(dirname(dest), { recursive: true });
+      await writeFile(dest, out.content);
+      changed.push(f.src);
     }
   }
-  if (changed.length === 0) return { files: [] };
+  if (changed.length === 0) return { files: [], notes };
   await git(repo.dir, ["add", "--", ...changed]);
   await git(repo.dir, [
     "commit",
     "--quiet",
     "-m",
-    `panem: export memory from ${pod.id}`,
+    `panem: save memory from ${pod.id}`,
     "-m",
     `Template: ${pod.template}\nMachine: ${pod.machine}\nRefs: ${pod.repos.map((r) => `${r.name}@${r.ref}`).join(", ")}`,
   ]);
   await git(repo.dir, ["push", "--quiet", "origin", `HEAD:${repo.branch}`]);
-  return { files: changed, commit: await repo.headUnlocked() };
+  return { files: changed, commit: await repo.headUnlocked(), notes };
+}
+
+async function readBytes(p: string): Promise<Uint8Array> {
+  return new Uint8Array(await readFile(p));
 }
 
 function isPushRace(e: unknown): boolean {

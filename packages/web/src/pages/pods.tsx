@@ -1,17 +1,9 @@
 import type { Job, Pod } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import {
-  ArrowUpRight,
-  ExternalLink,
-  GitBranch,
-  Play,
-  Plus,
-  RotateCcw,
-  Square,
-  Trash2,
-} from "lucide-react";
+import { ArrowUpRight, ExternalLink, GitBranch, Play, Plus, Square, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { type DeleteChoice, DeleteDialog } from "../components/delete-dialog";
 import { MachineDot, PodStateBadge } from "../components/status";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
@@ -38,8 +30,8 @@ export function PodsPage() {
         <Card className="flex flex-col items-center gap-3 px-6 py-10 text-center">
           <p className="font-medium">No pods yet</p>
           <p className="max-w-xs text-sm text-muted">
-            Summon one from a template onto any of your machines. It boots with your repos and
-            Claude context ready.
+            Summon one from a template onto any of your machines. It boots with your repos and your
+            agent's context ready.
           </p>
           <Link to="/summon">
             <Button variant="primary">
@@ -62,19 +54,18 @@ export function PodsPage() {
   );
 }
 
-type Confirm = "delete" | "force" | null;
-
 function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
-  const [confirm, setConfirm] = useState<Confirm>(null);
+  const [deleting, setDeleting] = useState(false);
   const action = useMutation({
-    mutationFn: async (a: "stop" | "start" | "delete" | "force" | "retry") => {
-      if (a === "delete") return api("DELETE", `/api/pods/${pod.id}`);
+    mutationFn: async (a: "stop" | "start" | DeleteChoice) => {
+      if (a === "save") return api("DELETE", `/api/pods/${pod.id}`);
+      if (a === "nomemory") return api("DELETE", `/api/pods/${pod.id}?memory=false`);
       if (a === "force") return api("DELETE", `/api/pods/${pod.id}?force=true`);
       if (a === "retry") return api("POST", `/api/pods/${pod.id}/retry-export`);
       return api("POST", `/api/pods/${pod.id}/${a}`);
     },
     onSettled: () => {
-      setConfirm(null);
+      setDeleting(false);
       queryClient.invalidateQueries({ queryKey: keys.pods });
     },
   });
@@ -133,87 +124,66 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         </p>
       )}
 
-      {confirm ? (
-        <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface-2 p-3">
-          <p className="text-sm">
-            {confirm === "delete"
-              ? "Export this pod's memory to the workspace repo, then delete it?"
-              : "Force delete without exporting? Memory Claude built in this pod will be lost."}
-          </p>
-          <div className="flex gap-2">
-            <Button
-              variant="danger"
-              size="sm"
-              disabled={action.isPending}
-              onClick={() => action.mutate(confirm)}
-            >
-              {confirm === "delete" ? "Export & delete" : "Discard & delete"}
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirm(null)}>
-              Cancel
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex flex-wrap items-center gap-2">
-          {pod.state === "running" && (
-            <>
-              <a href="https://claude.ai/code" target="_blank" rel="noreferrer">
-                <Button variant="primary" size="sm">
-                  <ExternalLink /> Open in Claude
-                </Button>
-              </a>
-              <Button
-                size="sm"
-                disabled={offline || action.isPending}
-                onClick={() => action.mutate("stop")}
-              >
-                <Square /> Stop
-              </Button>
-            </>
-          )}
-          {pod.state === "stopped" && (
+      <div className="flex flex-wrap items-center gap-2">
+        {pod.state === "running" && (
+          <>
+            {(pod.agents ?? []).flatMap((a) =>
+              a.connect.map((c) => (
+                <a key={`${a.id}:${c.url}`} href={c.url} target="_blank" rel="noreferrer">
+                  <Button variant="primary" size="sm" title={a.label || a.id}>
+                    <ExternalLink /> {c.label}
+                  </Button>
+                </a>
+              )),
+            )}
             <Button
               size="sm"
               disabled={offline || action.isPending}
-              onClick={() => action.mutate("start")}
+              onClick={() => action.mutate("stop")}
             >
-              <Play /> Start
+              <Square /> Stop
             </Button>
-          )}
-          {exportFailed && !offline && (
-            <Button size="sm" disabled={action.isPending} onClick={() => action.mutate("retry")}>
-              <RotateCcw /> Retry export
-            </Button>
-          )}
-          <div className="ml-auto flex gap-2">
-            {(offline || pod.state === "error") && (
-              <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirm("force")}>
-                Force delete
-              </Button>
-            )}
-            {!offline && !exportFailed && (
-              <Button
-                variant="ghost"
-                size="sm"
-                aria-label="Delete pod"
-                disabled={busy}
-                onClick={() => setConfirm("delete")}
-              >
-                <Trash2 /> Delete
-              </Button>
-            )}
-          </div>
+          </>
+        )}
+        {pod.state === "stopped" && (
+          <Button
+            size="sm"
+            disabled={offline || action.isPending}
+            onClick={() => action.mutate("start")}
+          >
+            <Play /> Start
+          </Button>
+        )}
+        <div className="ml-auto flex gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="Delete pod"
+            aria-haspopup="dialog"
+            disabled={busy}
+            onClick={() => setDeleting(true)}
+          >
+            <Trash2 /> Delete
+          </Button>
         </div>
-      )}
-      {pod.state === "running" && (
+      </div>
+      <DeleteDialog
+        pod={pod}
+        open={deleting}
+        onClose={() => setDeleting(false)}
+        onChoose={(c) => action.mutate(c)}
+        busy={action.isPending}
+        saveFailed={exportFailed}
+      />
+      {pod.state === "running" && (pod.agents ?? []).length > 0 && (
         <p className="text-xs text-muted">
-          Remote Control session: <span className="font-mono">{pod.id}</span>
+          {(pod.agents ?? []).map((a) => a.label || a.id).join(", ")} · session{" "}
+          <span className="font-mono">{pod.id}</span>
         </p>
       )}
       {offline && (
         <p className="text-xs text-muted">
-          Machine is offline. Delete needs it online to export memory.
+          Machine is offline. Deleting now skips its before-destroy hooks and memory.
         </p>
       )}
     </Card>

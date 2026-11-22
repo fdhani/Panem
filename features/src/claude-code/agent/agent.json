@@ -1,0 +1,5 @@
+{
+  "id": "claude-code",
+  "label": "Claude Code",
+  "connect": [{ "label": "Open in Claude", "url": "https://claude.ai/code" }]
+}

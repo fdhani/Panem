@@ -46,9 +46,19 @@ describe("DevPodBackend", () => {
     expect(calls()[0]).not.toContain("secret");
     expect(l).toContain("ENV CLAUDE_CODE_OAUTH_TOKEN=secret");
     expect(l).toContain('ENV PANEM_POD={"id":"x"}');
-    // DevPod skips Feature lifecycle hooks, so setup runs over ssh right after up.
+    // DevPod skips Feature lifecycle hooks, so setup runs over ssh right after up...
     expect(calls()[1]).toStartWith(
       "ARGS ssh shop-abc123 --command if\\ \\[\\ -x\\ /usr/local/share/panem/post-create.sh",
+    );
+    // ...but not the start hook: the controller copies synced files in first.
+    expect(calls()[1]).not.toContain("post-start");
+    expect(calls()).toHaveLength(2);
+  });
+
+  test("runHook start runs post-start over ssh", async () => {
+    await dp.runHook("p1", "start");
+    expect(calls()[0]).toStartWith(
+      "ARGS ssh p1 --command if\\ \\[\\ -x\\ /usr/local/share/panem/post-start.sh",
     );
   });
 
@@ -168,5 +178,47 @@ describe("parsers", () => {
     expect(parseStatus('{"state":"Running"}')).toBe("running");
     expect(parseStatus('{"state":"NotFound"}')).toBe("notfound");
     expect(parseStatus("garbage")).toBe("unknown");
+  });
+});
+
+describe("upload", () => {
+  const exec = (extra: Record<string, string> = {}) =>
+    new DevPodBackend({
+      bin: join(import.meta.dir, "fake-devpod.sh"),
+      env: { FAKE_DIR: dir, FAKE_LOG: log, FAKE_EXEC: "1", ...extra },
+    });
+  const bytes = (n: number) => crypto.getRandomValues(new Uint8Array(n));
+
+  test("pipes bytes over stdin when devpod ssh passes it through", async () => {
+    const be = exec();
+    const data = bytes(200_000);
+    const out = join(dir, "got");
+    const r = await be.upload("p1", data, `cat > ${out}`);
+    expect(r.exitCode).toBe(0);
+    expect(new Uint8Array(readFileSync(out))).toEqual(data);
+    expect(calls()).toHaveLength(1);
+  });
+
+  test("falls back to base64 chunks when stdin doesn't arrive, and remembers", async () => {
+    const be = exec({ FAKE_DROP_STDIN: "1" });
+    const data = bytes(150_000); // several chunks
+    const out = join(dir, "got");
+    const r = await be.upload("p1", data, `cat > ${out}; echo done`);
+    expect(r.exitCode).toBe(0);
+    expect(new TextDecoder().decode(r.stdout).trim()).toBe("done");
+    expect(new Uint8Array(readFileSync(out))).toEqual(data);
+    const first = calls().length;
+    expect(first).toBeGreaterThan(3);
+    // The second upload skips the stdin attempt.
+    await be.upload("p1", bytes(10), `cat > ${out}`);
+    expect(calls()[first]).not.toContain("wc");
+  });
+
+  test("the command's own failure is returned, not retried", async () => {
+    const be = exec();
+    const r = await be.upload("p1", bytes(10), "echo nope >&2; exit 3");
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr).toContain("nope");
+    expect(calls()).toHaveLength(1);
   });
 });

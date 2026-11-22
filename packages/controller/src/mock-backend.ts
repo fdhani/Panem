@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -20,21 +20,34 @@ interface MockPod {
   machine: string;
   status: "running" | "stopped";
   env: Record<string, string>;
-  /** Files under ~/.claude/projects, keyed by relative path. */
-  files: Map<string, string>;
+  /** A real folder standing in for the container: <dir>/home and <dir>/codebase. */
+  dir: string;
 }
 
+type Op = "up" | "stop" | "start" | "delete" | "exec" | "upload" | "hook";
+
 /**
- * In-memory PodBackend for tests and `PANEM_BACKEND=mock` UI development.
- * `exec` understands the export command and returns a real base64 tarball.
+ * PodBackend for tests and `PANEM_BACKEND=mock`. Each pod is a real temp folder with a fake
+ * $HOME and code root, and exec/upload really run their commands there (with HOME and
+ * PANEM_CODE_ROOT pointed at it), so the in-pod scripts are exercised for real.
  */
 export class MockBackend implements PodBackend {
   pods = new Map<string, MockPod>();
   machinesList: BackendMachine[] = [];
   delayMs = 0;
-  failNext: Partial<Record<"up" | "stop" | "start" | "delete" | "exec", string>> = {};
+  failNext: Partial<Record<Op, string>> = {};
+  /** What happened, in order: "up:<id>", "upload:<id>", "hook:start:<id>", ... */
+  events: string[] = [];
+  /** What setup writes to ~/.panem/agents.json (undefined: none, like an older Feature). */
+  agentsJson: string | undefined = JSON.stringify([
+    {
+      id: "claude-code",
+      label: "Claude Code",
+      connect: [{ label: "Open in Claude", url: "https://claude.ai/code" }],
+    },
+  ]);
 
-  private async step(op: keyof MockBackend["failNext"]) {
+  private async step(op: Op) {
     if (this.delayMs) await Bun.sleep(this.delayMs);
     const f = this.failNext[op];
     if (f) {
@@ -49,17 +62,48 @@ export class MockBackend implements PodBackend {
     return p;
   }
 
+  home(id: string): string {
+    return join(this.pod(id).dir, "home");
+  }
+
+  codeRoot(id: string): string {
+    return join(this.pod(id).dir, "codebase");
+  }
+
+  /** Stands in for /usr/local/share/panem/agents (agent hooks live here). */
+  agentsDir(id: string): string {
+    return join(this.pod(id).dir, "agents");
+  }
+
+  /** Test helper: install an agent hook in the pod. */
+  writeAgentHook(id: string, agent: string, hook: string, script: string) {
+    const dir = join(this.agentsDir(id), agent);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, hook), script, { mode: 0o755 });
+  }
+
   async up(o: UpOptions) {
     await this.step("up");
     if (!this.machinesList.some((m) => m.name === o.machine)) {
       throw new BackendError(`provider ${o.machine} not found`);
     }
-    const files = new Map<string, string>();
+    const dir = mkdtempSync(join(tmpdir(), `panem-mockpod-${o.id}-`));
+    const pod: MockPod = { id: o.id, machine: o.machine, status: "running", env: o.env, dir };
+    this.pods.set(o.id, pod);
+    // What post-create does: clone the repos (here: empty git repos) and write pod.json.
     const meta = JSON.parse(o.env.PANEM_POD ?? "{}") as { repos?: { name: string }[] };
     for (const r of meta.repos ?? []) {
-      files.set(`${claudeProjectDir(repoPath(r.name))}/memory/MEMORY.md`, "");
+      const repo = join(this.codeRoot(o.id), r.name);
+      mkdirSync(repo, { recursive: true });
+      Bun.spawnSync(["git", "init", "-q", repo]);
     }
-    this.pods.set(o.id, { id: o.id, machine: o.machine, status: "running", env: o.env, files });
+    mkdirSync(join(this.home(o.id), ".panem"), { recursive: true });
+    mkdirSync(this.agentsDir(o.id), { recursive: true });
+    writeFileSync(join(this.home(o.id), ".panem/pod.json"), o.env.PANEM_POD ?? "{}");
+    if (this.agentsJson !== undefined) {
+      writeFileSync(join(this.home(o.id), ".panem/agents.json"), this.agentsJson);
+    }
+    this.events.push(`up:${o.id}`);
   }
 
   async list(): Promise<BackendPod[]> {
@@ -69,6 +113,7 @@ export class MockBackend implements PodBackend {
   async start(id: string) {
     await this.step("start");
     this.pod(id).status = "running";
+    this.events.push(`start:${id}`);
   }
 
   async stop(id: string) {
@@ -78,45 +123,79 @@ export class MockBackend implements PodBackend {
 
   async delete(id: string, opts: { force?: boolean } = {}) {
     await this.step("delete");
-    if (!this.pods.has(id) && !opts.force) return;
+    const p = this.pods.get(id);
+    if (!p && !opts.force) return;
+    if (p) rmSync(p.dir, { recursive: true, force: true });
     this.pods.delete(id);
+  }
+
+  private async run(id: string, command: string, stdin?: Uint8Array): Promise<ExecResult> {
+    const p = this.pod(id);
+    if (p.status !== "running") return fail("DevPod workspace is stopped");
+    const proc = Bun.spawn(["bash", "-c", command], {
+      cwd: this.home(id),
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: this.home(id),
+        PANEM_CODE_ROOT: this.codeRoot(id),
+        PANEM_AGENTS_DIR: this.agentsDir(id),
+      },
+      stdin: stdin ?? "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).bytes(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { exitCode, stdout, stderr };
   }
 
   async exec(id: string, command: string): Promise<ExecResult> {
     await this.step("exec");
-    const p = this.pod(id);
-    if (p.status !== "running") return fail("DevPod workspace is stopped");
-    if (command.startsWith("cat /workspace/.panem/pod.json")) {
-      return { exitCode: 0, stdout: new TextEncoder().encode(p.env.PANEM_POD ?? "{}"), stderr: "" };
-    }
-    if (!command.includes("memory")) return fail(`mock: unsupported command ${command}`);
-    const files = [...p.files].filter(([, v]) => v !== "");
-    if (files.length === 0) return { exitCode: 0, stdout: new Uint8Array(), stderr: "" };
-    const dir = await mkdtemp(join(tmpdir(), "panem-mock-"));
-    try {
-      for (const [rel, content] of files) {
-        await mkdir(dirname(join(dir, rel)), { recursive: true });
-        await writeFile(join(dir, rel), content);
-      }
-      const tar = Bun.spawn(["tar", "-czf", "-", "-C", dir, ...files.map(([rel]) => `./${rel}`)], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const bytes = await new Response(tar.stdout).bytes();
-      if ((await tar.exited) !== 0) return fail(await new Response(tar.stderr).text());
-      return {
-        exitCode: 0,
-        stdout: new TextEncoder().encode(Buffer.from(bytes).toString("base64")),
-        stderr: "",
-      };
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    if (command.includes("panem-before-destroy")) this.events.push(`before-destroy:${id}`);
+    if (command.includes("panem-export")) this.events.push(`save-memory:${id}`);
+    return this.run(id, command);
+  }
+
+  async upload(id: string, data: Uint8Array, command: string): Promise<ExecResult> {
+    await this.step("upload");
+    this.events.push(`upload:${id}`);
+    return this.run(id, command, data);
+  }
+
+  async runHook(id: string, hook: "start") {
+    await this.step("hook");
+    this.events.push(`hook:${hook}:${id}`);
+  }
+
+  /** Local path of a pod path ("~/..." or "/codebase/..."). */
+  localPath(id: string, podPath: string): string {
+    if (podPath.startsWith("~/")) return join(this.home(id), podPath.slice(2));
+    if (podPath.startsWith("/codebase/")) return join(this.codeRoot(id), podPath.slice(10));
+    throw new Error(`unexpected pod path ${podPath}`);
+  }
+
+  /** Test helper: write a file in the pod, as the agent would. */
+  writePodFile(id: string, podPath: string, content: string | Uint8Array) {
+    const p = this.localPath(id, podPath);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, content);
+  }
+
+  readPodFile(id: string, podPath: string): string | undefined {
+    const p = this.localPath(id, podPath);
+    return existsSync(p) ? readFileSync(p, "utf8") : undefined;
   }
 
   /** Test helper: simulate Claude writing memory inside a pod. */
   writeMemory(id: string, repo: string, file: string, content: string) {
-    this.pod(id).files.set(`${claudeProjectDir(repoPath(repo))}/memory/${file}`, content);
+    this.writePodFile(
+      id,
+      `~/.claude/projects/${claudeProjectDir(repoPath(repo))}/memory/${file}`,
+      content,
+    );
   }
 
   async addMachine(m: BackendMachine) {

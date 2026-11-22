@@ -43,3 +43,10 @@ export async function readJson<T>(path: string, fallback: T): Promise<T> {
     return fallback;
   }
 }
+
+/** All agent credentials: agentEnv, plus the older claudeOauthToken setting (agentEnv wins). */
+export function agentCredentials(cfg: Config): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (cfg.claudeOauthToken) out.CLAUDE_CODE_OAUTH_TOKEN = cfg.claudeOauthToken;
+  return { ...out, ...cfg.agentEnv };
+}

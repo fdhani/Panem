@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { GitRef } from "./refs";
+import { ResolvedSync, SyncEntry } from "./sync";
+
+export { GitRef } from "./refs";
 
 /** Lowercase name usable in DevPod ids, provider names, and paths. */
 export const Slug = z
@@ -7,16 +11,46 @@ export const Slug = z
   .max(40)
   .regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, "lowercase letters, digits, and dashes only");
 
-/** Git ref: branch, tag, or commit. Rejects anything that could become a CLI flag. */
-export const GitRef = z
+/** An environment variable name for agent credentials. PANEM_* names are Panem's own. */
+export const EnvName = z
   .string()
-  .min(1)
-  .max(200)
-  .regex(/^[A-Za-z0-9._/-]+$/, "invalid git ref")
-  .refine((r) => !r.startsWith("-") && !r.includes(".."), "invalid git ref");
+  .regex(/^[A-Z_][A-Z0-9_]*$/, "env names: uppercase letters, digits and _")
+  .refine((n) => !n.startsWith("PANEM_"), "PANEM_* names are reserved");
+
+/** Credentials a template gets when it doesn't list `env`. */
+export const DEFAULT_TEMPLATE_ENV = ["CLAUDE_CODE_OAUTH_TOKEN"];
+
+/** Commands a template runs in its pods at lifecycle points. */
+export const TemplateHooks = z
+  .object({
+    /**
+     * Runs in the pod (bash, from /codebase) before it's deleted, after agents' own hooks and
+     * before agent memory is saved. E.g. push overlay work to its repo. Failing keeps the pod.
+     */
+    beforeDestroy: z.string().min(1).optional(),
+  })
+  .strict();
+export type TemplateHooks = z.infer<typeof TemplateHooks>;
+
+/** An agent installed in a pod (from ~/.panem/agents.json, written by the Panem base). */
+export const AgentInfo = z.object({
+  id: z.string(),
+  label: z.string().default(""),
+  connect: z.array(z.object({ label: z.string(), url: z.string().url() })).default([]),
+});
+export type AgentInfo = z.infer<typeof AgentInfo>;
+
+/** What pods from before agents were pluggable have: Claude Code with Remote Control. */
+export const LEGACY_AGENTS: AgentInfo[] = [
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    connect: [{ label: "Open in Claude", url: "https://claude.ai/code" }],
+  },
+];
 
 export const TemplateRepo = z.object({
-  /** Folder name under /workspace. */
+  /** Folder name under /codebase. */
   name: Slug,
   url: z.string().min(1),
   ref: GitRef.default("main"),
@@ -36,6 +70,16 @@ export const Template = z.object({
   ports: PortNames.optional(),
   /** Ports never exposed (e.g. debuggers, internal agents). */
   ignorePorts: z.array(PortNumber).optional(),
+  /** Replaces panem.json's `sync` (rules and presets) for pods of this template. */
+  sync: z.array(SyncEntry).optional(),
+  /**
+   * Agent credentials (names of the controller's `agentEnv`) this template's pods receive.
+   * Absent: just the Claude token, as before agents were pluggable.
+   */
+  env: z.array(EnvName).optional(),
+  hooks: TemplateHooks.optional(),
+  /** Added to panem.json's `exclude` for pods of this template. */
+  syncExclude: z.array(z.string().min(1)).optional(),
   /** Path inside the workspace repo, relative to its root. Defaults to the template's .devcontainer folder. */
   devcontainerPath: z.string().min(1).optional(),
 });
@@ -93,6 +137,15 @@ export const PodMeta = z.object({
    * everything else stays closed until switched on.
    */
   exposePorts: z.array(PortNumber).optional(),
+  /**
+   * The sync rules and sources resolved at summon, plus what was sent (merge bases).
+   * Export uses this, never the workspace repo's current panem.json. Absent on older pods.
+   */
+  sync: ResolvedSync.optional(),
+  /** The template's hooks as they were at summon (delete runs these, not today's template). */
+  hooks: TemplateHooks.optional(),
+  /** Agents installed in the pod, read after its start hook. Absent on older pods. */
+  agents: z.array(AgentInfo).optional(),
 });
 export type PodMeta = z.infer<typeof PodMeta>;
 
@@ -126,6 +179,8 @@ export const Job = z.object({
   podId: z.string(),
   status: JobStatus,
   attempts: z.number().int().default(0),
+  /** Save agent memory before deleting. Before-destroy hooks run either way. */
+  saveMemory: z.boolean().default(true),
   error: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -137,7 +192,10 @@ export const Config = z.object({
   /** Branch of the workspace repo used for templates and memory. */
   workspaceBranch: z.string().default("main"),
   apiToken: z.string().min(16),
+  /** Kept for older configs: same as agentEnv.CLAUDE_CODE_OAUTH_TOKEN. */
   claudeOauthToken: z.string().optional(),
+  /** Agent credentials, by env var name. Each template lists which ones its pods get. */
+  agentEnv: z.record(EnvName, z.string().min(1)).default({}),
   port: z.number().int().default(7420),
   devpodPath: z.string().default("devpod"),
   /** Extra listen addresses; the Tailscale IP is added automatically when found. */

@@ -1,15 +1,24 @@
 import type { Template, TemplateRepo } from "./schemas";
 
-/** All repos mount here; identical on every machine so Claude's project folder matches. */
-export const WORKSPACE_ROOT = "/workspace";
+/** Code repos live here; identical on every machine so Claude's project folder names match. */
+export const CODE_ROOT = "/codebase";
+/** The code root before the /codebase rename. Export still recognises its memory folders. */
+export const LEGACY_CODE_ROOT = "/workspace";
+
+/** Panem's per-pod files inside a pod (pod.json, logs), and where they were before the rename. */
+export const POD_STATE_DIR = "~/.panem";
+export const LEGACY_POD_STATE_DIR = "/workspace/.panem";
+
+/** Shell snippet printing the pod's pod.json, from wherever this pod's Feature version wrote it. */
+export const READ_POD_JSON = `cat "$HOME/.panem/pod.json" 2>/dev/null || cat ${LEGACY_POD_STATE_DIR}/pod.json`;
 
 /** Claude Code's per-project folder name for a path: every "/" (and ".") becomes "-". */
 export function claudeProjectDir(path: string): string {
   return path.replace(/[^A-Za-z0-9-]/g, "-");
 }
 
-export function repoPath(repo: string): string {
-  return `${WORKSPACE_ROOT}/${repo}`;
+export function repoPath(repo: string, root = CODE_ROOT): string {
+  return `${root}/${repo}`;
 }
 
 export function machineProviderName(host: string): string {
