@@ -17,6 +17,10 @@ Files are copied into a pod when it's created; only agent memory comes back, whe
 deleted. It's merged with this folder line by line, so edits made here meanwhile are kept.
 Duplicate lines can build up over time: tidy them now and then.
 
+Templates shouldn't start databases or backends (no `postStartCommand` for that): pods would
+run them all the time. The agent starts what a task needs, guided by the "Services" section in
+CLAUDE.md.
+
 This folder lives only on the controller, so back it up. Panem never runs git itself, but
 panem.json can give it commands to run here, e.g. with this folder as a git repo:
 

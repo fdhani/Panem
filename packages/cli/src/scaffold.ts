@@ -22,6 +22,10 @@ Files are copied into a pod when it's created; only agent memory comes back, whe
 deleted. It's merged with this folder line by line, so edits made here meanwhile are kept.
 Duplicate lines can build up over time: tidy them now and then.
 
+Templates shouldn't start databases or backends (no \`postStartCommand\` for that): pods would
+run them all the time. The agent starts what a task needs, guided by the "Services" section in
+CLAUDE.md.
+
 This folder lives only on the controller, so back it up. Panem never runs git itself, but
 panem.json can give it commands to run here, e.g. with this folder as a git repo:
 
@@ -36,6 +40,13 @@ See "Workspace hooks" in Panem's README.
 
 Repos live under /codebase/<repo>. Commit and push work you want to keep: pods are disposable,
 and only pushed refs can be summoned into another pod.
+
+## Services
+
+Databases, backend services and other dev services are not running when the pod starts.
+Start only what the current task needs, when it needs it (for example \`docker compose up -d db\`
+in the repo), and stop it when you're done (\`docker compose stop\`). Don't give containers a
+restart policy (\`restart: always\` or \`unless-stopped\`): they'd come back on every pod start.
 `,
   "panem.json": `{
   "sources": {},
@@ -62,9 +73,9 @@ and only pushed refs can be summoned into another pod.
     "ghcr.io/devcontainers/features/node:1": {},
     "ghcr.io/devcontainers/features/docker-in-docker:2": {},
     "ghcr.io/fdhani/panem/claude-code:0": { "permissionMode": "acceptEdits" }
-  },
-  // Dev servers: runs on every start, after the Feature's Remote Control hook.
-  "postStartCommand": "cd /codebase/api && (docker compose up -d || true)"
+  }
+  // No postStartCommand starting services (databases, backends): they'd run on every pod
+  // start. The agent starts what a task needs, when it needs it (see CLAUDE.md).
 }
 `,
   "memory/.gitkeep": "",

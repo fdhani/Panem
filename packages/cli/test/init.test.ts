@@ -159,3 +159,14 @@ test("no message suggests `panem init --force` as a fix", () => {
   ]).stdout.toString();
   expect(out).toBe("");
 });
+
+test("the example template starts no services; CLAUDE.md tells the agent to start what it needs", async () => {
+  const { SCAFFOLD } = await import("../src/scaffold");
+  const devcontainer = SCAFFOLD["templates/example/.devcontainer/devcontainer.json"]!;
+  expect(devcontainer).not.toMatch(/"postStartCommand"/);
+  expect(devcontainer).not.toContain("compose up");
+  const claude = SCAFFOLD["CLAUDE.md"]!;
+  expect(claude).toContain("## Services");
+  expect(claude).toContain("not running when the pod starts");
+  expect(claude).toContain("docker compose stop");
+});
