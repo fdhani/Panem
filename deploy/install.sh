@@ -16,7 +16,8 @@ install -Dm644 "$HERE/panem.service" "$HOME/.config/systemd/user/panem.service"
 
 # Let the user service run without an active login session (always-on server).
 if command -v loginctl >/dev/null; then
-  loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" || true
+  me="$(id -un)"
+  loginctl enable-linger "$me" 2>/dev/null || sudo loginctl enable-linger "$me" || true
 fi
 
 if [ ! -f "${PANEM_CONFIG:-$HOME/.config/panem/config.json}" ]; then
