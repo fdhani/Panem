@@ -7,6 +7,15 @@ set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
+if [ ! -w "$PANEM_WORKSPACE_ROOT" ]; then
+  # Image built before the user's UID was remapped: take ownership if sudo allows it.
+  sudo -n mkdir -p "$PANEM_WORKSPACE_ROOT" 2>/dev/null || true
+  sudo -n chown "$(id -u):$(id -g)" "$PANEM_WORKSPACE_ROOT" 2>/dev/null || true
+fi
+if [ ! -w "$PANEM_WORKSPACE_ROOT" ]; then
+  echo "[panem] $PANEM_WORKSPACE_ROOT is not writable by $(id -un) ($(id -u)): $(ls -ld "$PANEM_WORKSPACE_ROOT")" >&2
+  exit 1
+fi
 mkdir -p "$PANEM_STATE_DIR" "$CLAUDE_HOME"
 # Keep a log inside the pod: lifecycle output is otherwise easy to lose.
 exec > >(tee -a "$PANEM_STATE_DIR/post-create.log") 2>&1

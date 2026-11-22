@@ -39,6 +39,9 @@ ENV
 
 mkdir -p /workspace
 chown "$REMOTE_USER" /workspace 2>/dev/null || true
+# Devcontainer tooling may remap the user's UID to the host's after this build step, which
+# would leave /workspace owned by a stale UID. Sticky + world-writable (like /tmp) avoids that.
+chmod 1777 /workspace
 
 if [ "$INSTALL_CLAUDE" = "true" ]; then
   # Install for the remote user so updates and ~/.local/bin land in their home.
