@@ -46,6 +46,17 @@ describe("DevPodBackend", () => {
     expect(calls()[0]).not.toContain("secret");
     expect(l).toContain("ENV CLAUDE_CODE_OAUTH_TOKEN=secret");
     expect(l).toContain('ENV PANEM_POD={"id":"x"}');
+    // DevPod skips Feature lifecycle hooks, so setup runs over ssh right after up.
+    expect(calls()[1]).toStartWith(
+      "ARGS ssh shop-abc123 --command if\\ \\[\\ -x\\ /usr/local/share/panem/post-create.sh",
+    );
+  });
+
+  test("a failing pod setup fails up with its output", async () => {
+    fake("ssh", "cloning x\nfatal: repository not found\n", 1);
+    await expect(
+      dp.up({ id: "a", machine: "m-a", source: "/s", devcontainerPath: "p", env: {} }),
+    ).rejects.toThrow("pod setup failed: cloning x | fatal: repository not found");
   });
 
   test("up passes local folder sources without a branch suffix", async () => {
@@ -108,7 +119,10 @@ describe("DevPodBackend", () => {
     await dp.start("p1");
     await dp.delete("p1", { force: true });
     expect(calls()[0]).toBe("ARGS up p1 --ide none --open-ide=false");
-    expect(calls()[1]).toBe("ARGS delete p1 --ignore-not-found --force");
+    expect(calls()[1]).toStartWith(
+      "ARGS ssh p1 --command if\\ \\[\\ -x\\ /usr/local/share/panem/post-start.sh",
+    );
+    expect(calls()[2]).toBe("ARGS delete p1 --ignore-not-found --force");
   });
 
   test("exec returns raw bytes and exit code without throwing", async () => {

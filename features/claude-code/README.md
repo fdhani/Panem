@@ -26,6 +26,10 @@ Everything Claude-specific lives here; the controller has no Claude code.
 
 Apps can keep listening on `localhost`.
 
+DevPod (v0.6.x) doesn't run lifecycle hooks declared by Features, so Panem's DevPod backend runs them
+itself over `devpod ssh` after `up` (`post-create.sh` once, then `post-start.sh`) and after each
+start (`post-start.sh`). Both scripts are idempotent.
+
 Inputs (set by the controller): `PANEM_POD` (JSON pod metadata), `CLAUDE_CODE_OAUTH_TOKEN`
 (from `claude setup-token`), `PANEM_RELAY_SECRET`, and `PANEM_CONTEXT_DIR` (the workspace repo checkout; defaults to
 the current directory, which is the workspace folder for lifecycle hooks).

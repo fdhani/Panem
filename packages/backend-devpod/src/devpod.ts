@@ -8,6 +8,17 @@ import { run, text } from "./run";
 /** DevPod version this backend is tested against. Bump together with the CI integration test. */
 export const DEVPOD_VERSION = "v0.6.15";
 
+/** Where the claude-code Feature installs its hooks inside the pod. */
+const HOOKS = "/usr/local/share/panem";
+/** First boot: one-time setup unless pod.json shows it already ran, then the start hook. */
+export const BOOTSTRAP_CREATE = [
+  `if [ -x ${HOOKS}/post-create.sh ]; then`,
+  `  if [ ! -f /workspace/.panem/pod.json ]; then ${HOOKS}/post-create.sh || exit $?; fi;`,
+  `  ${HOOKS}/post-start.sh;`,
+  "fi",
+].join(" ");
+export const BOOTSTRAP_START = `if [ -x ${HOOKS}/post-start.sh ]; then ${HOOKS}/post-start.sh; fi`;
+
 /** Provider names the controller owns. Other DevPod providers are left alone. */
 export const MACHINE_PREFIX = "m-";
 /** Host value that registers the controller's own Docker daemon instead of an SSH host. */
@@ -81,6 +92,26 @@ export class DevPodBackend implements PodBackend {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+    await this.lifecycle(o.id, "create");
+  }
+
+  /**
+   * DevPod (v0.6.x) doesn't run lifecycle hooks declared by devcontainer Features, so the
+   * pod's setup never happens on its own. Run the Feature's hooks over SSH instead. They are
+   * idempotent, so this is also safe where the hooks did run (e.g. the devcontainer CLI).
+   * Pods built without the Feature are left alone.
+   */
+  private async lifecycle(id: string, phase: "create" | "start"): Promise<void> {
+    const cmd = phase === "create" ? BOOTSTRAP_CREATE : BOOTSTRAP_START;
+    const r = await this.run(["ssh", id, "--command", cmd], 15 * 60_000, false);
+    if (r.exitCode !== 0) {
+      const out = `${text(r.stdout)}\n${r.stderr}`.trim();
+      throw new BackendError(
+        `pod ${phase === "create" ? "setup" : "start hook"} failed: ${out.split("\n").slice(-5).join(" | ")}`,
+        r.stderr,
+        r.exitCode,
+      );
+    }
   }
 
   async list(): Promise<BackendPod[]> {
@@ -108,6 +139,7 @@ export class DevPodBackend implements PodBackend {
   async start(id: string): Promise<void> {
     // `devpod up <id>` starts a stopped workspace; `devpod ssh` does not.
     await this.run(["up", id, "--ide", "none", "--open-ide=false"], this.upTimeoutMs);
+    await this.lifecycle(id, "start");
   }
 
   async stop(id: string): Promise<void> {
