@@ -36,7 +36,7 @@ describe("globs", () => {
 });
 
 describe("resolveSync", () => {
-  test("no panem.json gives today's defaults, all from the workspace repo", () => {
+  test("no panem.json gives today's defaults, all from the workspace folder", () => {
     const r = resolve(undefined);
     expect(r.rules).toHaveLength(DEFAULT_RULES.length);
     expect(r.rules.every((x) => x.source === "workspace")).toBe(true);
@@ -259,7 +259,7 @@ describe("mapping", () => {
     ).toEqual(["memory/api/MEMORY.md"]);
   });
 
-  test("agent memory must come from the workspace repo and be a folder under ~/", () => {
+  test("agent memory must come from the workspace folder and be a folder under ~/", () => {
     const where = "test";
     const base = {
       source: "workspace",
@@ -270,7 +270,7 @@ describe("mapping", () => {
     };
     expect(() => validateRule(base, {}, where)).not.toThrow();
     expect(() => validateRule({ ...base, source: "o" }, { o: {} }, where)).toThrow(
-      /workspace repo/,
+      /workspace folder/,
     );
     expect(() => validateRule({ ...base, from: "m.md", to: "~/m.md" }, {}, where)).toThrow(
       /folder under ~\//,

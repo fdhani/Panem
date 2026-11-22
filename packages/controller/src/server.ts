@@ -1,10 +1,9 @@
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
-import { type Config, type PodBackend, dataDir as defaultDataDir } from "@panem/core";
+import { type Config, type PodBackend, dataDir as defaultDataDir, loadConfig } from "@panem/core";
 import { createApp } from "./api";
 import { Credentials } from "./credentials";
 import { ForwarderManager, type Forwarders } from "./forwarders";
-import { WorkspaceRepo } from "./git";
 import { MockBackend, MockForwarders } from "./mock-backend";
 import { type HostProbe, StaticProbe, TailscaleProbe, tailscaleIPv4 } from "./probe";
 import { PodService } from "./service";
@@ -13,6 +12,7 @@ import { Sources } from "./sources";
 import { JobStore, PodStore } from "./stores";
 import { Templates } from "./templates";
 import { loadUi } from "./ui";
+import { Workspace } from "./workspace";
 
 export interface ControllerOptions {
   config: Config;
@@ -38,17 +38,19 @@ export async function createController(o: ControllerOptions) {
     (backend instanceof MockBackend
       ? new MockForwarders(backend)
       : new ForwarderManager(o.config, new SshShell()));
-  const repo = new WorkspaceRepo(
-    join(dir, "workspace"),
-    o.config.workspaceRepoUrl,
-    o.config.workspaceBranch,
+  // Read fresh, so `panem workspace init` applies without a restart.
+  const workspace = new Workspace(async () =>
+    o.configPath
+      ? (await loadConfig(o.configPath).catch(() => o.config)).workspaceDir
+      : o.config.workspaceDir,
   );
-  const templates = new Templates(repo);
-  const sources = new Sources({ dataDir: dir, workspace: repo });
+  const templates = new Templates(workspace);
+  const sources = new Sources({ dataDir: dir, workspace });
   const credentials = new Credentials(o.config, o.configPath);
   const service = new PodService({
     backend,
-    repo,
+    workspace,
+    dataDir: dir,
     templates,
     probe,
     pods: await PodStore.open(dir),
@@ -65,11 +67,12 @@ export async function createController(o: ControllerOptions) {
     service,
     templates,
     credentials,
+    workspace,
     apiToken: o.config.apiToken,
     ui: await loadUi(),
     log: o.log,
   });
-  return { app, service, backend, repo, credentials };
+  return { app, service, backend, workspace, credentials };
 }
 
 async function seededMock(): Promise<MockBackend> {

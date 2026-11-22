@@ -12,7 +12,7 @@ import { shq } from "../src/shell";
 import { makeController, makeWorkspace, until } from "./helpers";
 
 const cfg: Config = ConfigSchema.parse({
-  workspaceRepoUrl: "x",
+  workspaceDir: "/tmp/ws",
   apiToken: "api-token-0123456789",
   relaySecret: "relay-secret-0123456789",
   forwarderToken: "fwd-token-0123456789",
@@ -125,7 +125,7 @@ describe("ForwarderManager", () => {
 
   test("disabled without secrets", async () => {
     const m = new ForwarderManager(
-      ConfigSchema.parse({ workspaceRepoUrl: "x", apiToken: "a".repeat(16) }),
+      ConfigSchema.parse({ workspaceDir: "/tmp/ws", apiToken: "a".repeat(16) }),
       new FakeShell(),
     );
     expect(m.enabled).toBe(false);

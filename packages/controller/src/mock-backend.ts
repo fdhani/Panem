@@ -82,7 +82,11 @@ export class MockBackend implements PodBackend {
     writeFileSync(join(dir, hook), script, { mode: 0o755 });
   }
 
+  /** The last `up` call, for tests (where DevPod would build from). */
+  lastUp?: UpOptions;
+
   async up(o: UpOptions) {
+    this.lastUp = o;
     await this.step("up");
     if (!this.machinesList.some((m) => m.name === o.machine)) {
       throw new BackendError(`provider ${o.machine} not found`);

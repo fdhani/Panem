@@ -19,7 +19,7 @@ test("panem env set/ls/rm keeps values out of argv and output", () => {
   writeFileSync(
     cfg,
     JSON.stringify({
-      workspaceRepoUrl: "x",
+      workspaceDir: "/tmp/ws",
       apiToken: "a".repeat(16),
       claudeOauthToken: "old-tok",
     }),

@@ -74,7 +74,15 @@ export const keys = {
   jobs: ["jobs"] as const,
   templates: ["templates"] as const,
   credentials: ["credentials"] as const,
+  workspace: ["workspace"] as const,
 };
+
+/** The controller's workspace folder (undefined until `panem workspace init`). */
+export const useWorkspace = () =>
+  useQuery({
+    queryKey: keys.workspace,
+    queryFn: () => api<{ dir?: string }>("GET", "/api/workspace"),
+  });
 
 export const useCredentials = () =>
   useQuery({

@@ -1,19 +1,28 @@
 import type { Template } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Rocket } from "lucide-react";
+import { FolderOpen, Rocket } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { MachineDot } from "../components/status";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { Field, Input, Select } from "../components/ui/field";
-import { keys, queryClient, summon, useCredentials, useMachines, useTemplates } from "../lib/api";
+import {
+  keys,
+  queryClient,
+  summon,
+  useCredentials,
+  useMachines,
+  useTemplates,
+  useWorkspace,
+} from "../lib/api";
 import { QueryError } from "./shared";
 
 export function SummonPage() {
   const templates = useTemplates();
   const machines = useMachines();
   const credentials = useCredentials();
+  const workspace = useWorkspace();
   const navigate = useNavigate();
   const [templateName, setTemplateName] = useState("");
   const [machine, setMachine] = useState("");
@@ -53,6 +62,29 @@ export function SummonPage() {
   });
 
   if (templates.error) return <QueryError error={templates.error} />;
+  if (workspace.data && !workspace.data.dir) {
+    return (
+      <div className="flex flex-col gap-4">
+        <h1 className="text-xl font-semibold">Summon a pod</h1>
+        <Card className="flex flex-col gap-2 p-4">
+          <h2 className="flex items-center gap-2 font-medium">
+            <FolderOpen className="size-4 text-muted" /> No workspace yet
+          </h2>
+          <p className="text-sm text-muted">
+            Pods are built from templates in a workspace folder on the controller. In the folder you
+            want to use, run:
+          </p>
+          <pre className="overflow-x-auto rounded-lg bg-surface-2 px-3 py-2 font-mono text-sm">
+            panem workspace init
+          </pre>
+          <p className="text-xs text-muted">
+            It adds an example template, CLAUDE.md and panem.json, without touching files already
+            there. No restart needed.
+          </p>
+        </Card>
+      </div>
+    );
+  }
   const repos = template
     ? [...template.repos].sort((a, b) => Number(!!b.primary) - Number(!!a.primary))
     : [];

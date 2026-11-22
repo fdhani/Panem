@@ -10,14 +10,14 @@ of your machines. Each pod boots with:
 - your CLAUDE.md, memory, skills, and plans;
 - a Claude Code Remote Control session, which you open from the Claude app.
 
-When you delete a pod, the memory Claude built inside it is merged back into your workspace repo.
+When you delete a pod, the memory Claude built inside it is merged back into your workspace folder.
 The pod's dev servers are reachable from anywhere on your tailnet, served directly by the machine
 the pod runs on.
 
 ```
  phone / laptop ──Tailscale──▶ controller (panem serve) ──devpod──▶ machine A: pod, pod
                                    │                       └──────▶ machine B: pod
-                                   └── workspace repo (git): templates, CLAUDE.md, memory, skills
+                                   └── workspace folder: templates, CLAUDE.md, memory, skills
  Claude app ◀── Remote Control ── each pod
 ```
 
@@ -26,13 +26,13 @@ the pod runs on.
 | | |
 | --- | --- |
 | **Machine** | A Linux or macOS host with Docker, reachable over Tailscale and SSH. It is stored as a DevPod SSH provider named `m-<host>`. |
-| **Template** | `templates/<name>/` in the workspace repo: `template.json` (repos and default refs, and which credentials its pods get) plus `.devcontainer/devcontainer.json` (which lists one or more agent Features, e.g. `claude-code`). |
+| **Template** | `templates/<name>/` in the workspace folder: `template.json` (repos and default refs, and which credentials its pods get) plus `.devcontainer/devcontainer.json` (which lists one or more agent Features, e.g. `claude-code`). |
 | **Pod** | One template running on one machine at chosen refs. It is a DevPod workspace with the id `<template>-<6 chars>`. |
-| **Workspace repo** | Your private git repo. See [`examples/workspace`](examples/workspace) for the layout. |
+| **Workspace** | A folder on the controller, set up with `panem workspace init`: templates, `panem.json`, CLAUDE.md, skills, and saved memory. See [`examples/workspace`](examples/workspace) for what it starts with. |
 
 There is no database:
 - DevPod is the source of truth for machines and pods.
-- The workspace repo holds templates and context.
+- The workspace folder holds templates and context.
 - `~/.local/share/panem/` holds a rebuildable pod-metadata cache (`pods.json`) and the export queue (`jobs.json`).
 
 ## Setup
@@ -43,7 +43,9 @@ On the controller host (Ubuntu) you need `docker`, `git`, `tailscale`, and [DevP
 bun install && bun run build                # -> dist/panem (single binary, UI embedded)
 deploy/install.sh                           # ~/.local/bin/panem + systemd user service
 
-panem init --workspace-repo git@github.com:you/workspace.git
+panem init                                  # this controller: API token and secrets
+mkdir ~/panem-workspace && cd ~/panem-workspace
+panem workspace init                        # this folder is the workspace (adds an example template)
 claude setup-token                          # long-lived token so pods start logged in
 panem env set CLAUDE_CODE_OAUTH_TOKEN       # paste it at the hidden prompt (or use Settings in the UI)
 systemctl --user enable --now panem
@@ -56,20 +58,28 @@ Then:
 panem machine add vps --user dev            # or `local` for the controller's own Docker
 panem pod summon example -m vps --ref api=feat/login
 panem pod ls
-panem pod rm example-ab12cd                 # exports memory, then deletes
+panem pod rm example-ab12cd                 # saves memory into the workspace, then deletes
 ```
 
 The UI and API listen only on `127.0.0.1` and the host's Tailscale IP (port 7420). Every API call needs the bearer token.
 
+## The workspace folder
+
+`panem workspace init` makes a folder the workspace: the current one, or the one you name. It adds what's missing (an example template, `panem.json`, `CLAUDE.md`, and empty `memory/`, `skills/` and `plans/` folders) and never touches files already there. Running it in another folder switches the workspace, and the running controller picks that up without a restart. `panem workspace show` prints the current one.
+
+- **It's uploaded to machines.** DevPod copies the whole folder to a machine for every pod. Keep it to templates and context: it can't be `/` or your home folder, it can't hold Panem's config or data, and `init` warns past 50 MB. Never put secrets in it; use `panem env set`.
+- **Keeping history with git (optional):** make the folder a git repo and push it somewhere, to keep history or to edit templates from your laptop (pull on the controller afterwards). Panem only reads and writes files; it never commits, so commit the memory it saves whenever you like.
+- **Moving from a workspace repo:** configs from before this still point at a git URL, and `panem serve` stops with these steps: `git clone <url> ~/panem-workspace`, then `cd ~/panem-workspace && panem workspace init`. Templates, `panem.json` and `memory/` carry over as they are.
+
 ## How a pod is built
 
-1. The controller pulls the workspace repo, resolves the pod's sync rules from `panem.json` (see below), and saves them with the pod.
-2. It runs `devpod up <workspace repo>@<branch> --devcontainer-path templates/<t>/... --provider m-<host>`. The pod metadata (`PANEM_POD`), the credentials the template lists and the relay secret are passed through a 0600 env file.
+1. The controller reads the template from the workspace folder, resolves the pod's sync rules from `panem.json` (see below), and saves them with the pod.
+2. It runs `devpod up <workspace folder> --devcontainer-path templates/<t>/... --provider m-<host>`. DevPod uploads the folder to the machine and builds the pod from the template's devcontainer. The pod metadata (`PANEM_POD`), the credentials the template lists and the relay secret are passed through a 0600 env file.
 3. **One-time setup** (the Feature's `post-create.sh`): clones each code repo at its ref into `/codebase/<repo>` (only pushed work is reachable), pre-trusts `/codebase/*`, and keeps Panem's own files (pod.json, logs) in `~/.panem/`.
-4. **Copy-in:** the controller copies the synced files in (CLAUDE.md, skills, memory, overlays, whatever the rules say) and records exactly what it sent.
+4. **Copy-in:** the controller copies the synced files in (CLAUDE.md, skills, memory, overlays, whatever the rules say). It keeps a copy of the memory it sent, under `~/.local/share/panem/pods/<id>/memory-base/`, to merge against when the pod is deleted.
 5. **Start hook** (`post-start.sh`): starts the port relay and `claude remote-control --name <pod id>` in tmux. It also runs on every later start.
 
-Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.panem/`; DevPod's own checkout of the workspace repo is in `/workspaces/<pod-id>/`, and Panem doesn't use it.
+Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.panem/`; DevPod's own copy of the workspace folder is in `/workspaces/<pod-id>/`, and Panem doesn't use it.
 
 ## Reaching pod services (ports)
 
@@ -119,7 +129,7 @@ Panem itself is agent-agnostic. Agents are devcontainer Features that a template
 
 ## Synced files (`panem.json`)
 
-`panem.json` at the root of the workspace repo decides which files are copied into a pod when it's created. **Sync is copy-in only.** The one exception is agent memory, which is saved back on delete.
+`panem.json` at the root of the workspace folder decides which files are copied into a pod when it's created. **Sync is copy-in only.** The one exception is agent memory, which is saved back on delete.
 
 Without the file, the defaults apply (`[{ "preset": "claude-code" }]`), which are what Panem always did:
 - `CLAUDE.md`, `skills/`, `plans/`, `agents/` and `commands/` are copied into `~/.claude/`.
@@ -141,7 +151,7 @@ Without the file, the defaults apply (`[{ "preset": "claude-code" }]`), which ar
 ```
 
 **Sources** are where files come from:
-- **The workspace repo:** any rule without `source`.
+- **The workspace folder:** any rule without `source`.
 - **Other git repos** (`git` + `ref`): the controller clones and pulls them itself. An empty repo is fine.
 - **Folders on the controller host** (`dir`).
 
@@ -164,10 +174,10 @@ Without the file, the defaults apply (`[{ "preset": "claude-code" }]`), which ar
 **On delete**, agent memory is saved, one pod at a time:
 1. Start the pod if it's stopped.
 2. Collect the agent's memory folders, within a limit of 50 MB packed and 5,000 files.
-3. Merge each file three ways against the commit the pod was given, keeping every line either side added. A binary file is taken only if the repo's copy didn't change. Deletions never propagate.
-4. Commit and push to the workspace repo (retrying on push races). Only then is the pod deleted.
+3. Merge each file into the workspace folder three ways, against the copy the pod was given, keeping every line either side added. Edits made in the folder while the pod ran are kept. A binary file is taken only if the folder's copy didn't change. Deletions never propagate.
+4. Only then is the pod deleted. Panem never commits: if the folder is a git repo, commit and push it yourself (see "The workspace folder").
 
-If saving fails, the pod stays in `error` with **Retry**. Saving always uses the rules the pod was created with, even if `panem.json` changed since. Pods from before this export memory with the defaults, including pre-rename `-workspace-<repo>` folders.
+If saving fails, the pod stays in `error` with **Retry**. Saving always uses the rules the pod was created with, even if `panem.json` changed since. Pods from before this export memory with the defaults, including pre-rename `-workspace-<repo>` folders. Pods from when the workspace was a git repo have no saved copy to merge against, so both sides' lines are kept.
 
 Nothing else comes back. Work worth keeping in an overlay (e.g. new specs) is pushed by the pod itself, from a before-destroy hook (see below), or committed to the code repo.
 

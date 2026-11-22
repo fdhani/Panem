@@ -1,3 +1,5 @@
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import {
   type AddMachineRequest,
   AgentInfo,
@@ -26,13 +28,13 @@ import {
 import { z } from "zod";
 import { exportPod } from "./exporter";
 import type { Forwarders, MachineRef } from "./forwarders";
-import type { WorkspaceRepo } from "./git";
 import { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";
 import type { HostProbe } from "./probe";
 import type { Sources } from "./sources";
 import type { JobStore, PodStore } from "./stores";
 import { syncIn } from "./sync-in";
 import type { Templates } from "./templates";
+import type { Workspace } from "./workspace";
 
 export class HttpError extends Error {
   constructor(
@@ -50,7 +52,10 @@ interface Op {
 
 export interface ServiceDeps {
   backend: PodBackend;
-  repo: WorkspaceRepo;
+  /** The workspace folder: templates, files to copy in, and where memory is saved. */
+  workspace: Workspace;
+  /** Panem's data folder; each pod's memory merge base lives under pods/<id>/memory-base. */
+  dataDir: string;
   templates: Templates;
   pods: PodStore;
   jobs: JobStore;
@@ -297,7 +302,6 @@ export class PodService {
           template: b.id.replace(/-[a-z0-9]{6}$/, ""),
           machine: b.machine,
           repos: [],
-          workspaceSha: "",
           createdAt: "",
         });
       }
@@ -449,13 +453,17 @@ export class PodService {
     } catch (e) {
       throw new HttpError(400, msg(e));
     }
-    const workspaceSha = await this.d.repo.sync();
+    let source: string;
+    try {
+      source = await this.d.workspace.dir();
+    } catch (e) {
+      throw new HttpError(409, msg(e));
+    }
     const meta = PodMeta.parse({
       id: newPodId(template.name),
       template: template.name,
       machine: machine.name,
       repos,
-      workspaceSha,
       createdAt: new Date().toISOString(),
       ports: template.ports,
       ignorePorts: template.ignorePorts,
@@ -482,8 +490,8 @@ export class PodService {
       .up({
         id: meta.id,
         machine: machine.name,
-        source: this.d.repo.url,
-        sourceRef: this.d.repo.branch,
+        // DevPod uploads the workspace folder to the machine and builds from it.
+        source,
         devcontainerPath: devcontainerPathFor(template),
         env,
       })
@@ -540,11 +548,17 @@ export class PodService {
     }
   }
 
-  /** Copy synced files in and record what was sent (the export's merge bases). */
+  /** Where a pod's memory merge base is kept: the memory it was given at copy-in. */
+  private memoryBase(id: string): string {
+    return join(this.d.dataDir, "pods", id, "memory-base");
+  }
+
+  /** Copy synced files in, keeping the memory sent as the merge base for saving it back. */
   private async syncIntoPod(meta: PodMeta): Promise<void> {
-    const r = await syncIn({ backend: this.d.backend, sources: this.d.sources }, meta);
-    const current = this.d.pods.get(meta.id) ?? meta;
-    await this.d.pods.put({ ...current, workspaceSha: r.workspaceSha });
+    const r = await syncIn(
+      { backend: this.d.backend, sources: this.d.sources, memoryBase: this.memoryBase(meta.id) },
+      meta,
+    );
     for (const n of r.notes) this.log(`${meta.id}: ${n}`);
     this.log(`synced ${r.files} file(s) into ${meta.id}`);
   }
@@ -665,6 +679,7 @@ export class PodService {
     const job = this.d.jobs.forPod(id);
     if (job) await this.d.jobs.remove(job.id);
     await this.d.pods.remove(id);
+    await rm(join(this.d.dataDir, "pods", id), { recursive: true, force: true });
     this.backendPods = this.backendPods.filter((p) => p.id !== id);
     this.lastStatus.delete(id);
     this.setOp(id, undefined);
@@ -711,11 +726,18 @@ export class PodService {
         this.setOp(meta.id, { state: "exporting" });
         await this.runBeforeDestroy(meta);
         if (job.saveMemory) {
-          const r = await exportPod({ backend: this.d.backend, repo: this.d.repo }, meta);
+          const r = await exportPod(
+            {
+              backend: this.d.backend,
+              workspace: this.d.workspace,
+              memoryBase: this.memoryBase(meta.id),
+            },
+            meta,
+          );
           for (const n of r.notes) this.log(`${meta.id}: ${n}`);
           this.log(
             r.files.length
-              ? `saved ${r.files.length} memory file(s) from ${meta.id} (${r.commit?.slice(0, 8)})`
+              ? `saved ${r.files.length} memory file(s) from ${meta.id} into the workspace`
               : `no memory changes in ${meta.id}`,
           );
         } else {

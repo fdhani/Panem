@@ -1,7 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { Template, devcontainerPathFor, resolveSync } from "@panem/core";
-import type { WorkspaceRepo } from "./git";
+import type { Workspace } from "./workspace";
 
 export interface TemplateLoadResult {
   templates: Template[];
@@ -11,14 +11,12 @@ export interface TemplateLoadResult {
 }
 
 export class Templates {
-  constructor(
-    private readonly repo: WorkspaceRepo,
-    private readonly ttlMs = 30_000,
-  ) {}
+  constructor(private readonly workspace: Workspace) {}
 
+  /** Templates in the workspace folder (none while no workspace is set). */
   async list(): Promise<TemplateLoadResult> {
-    await this.repo.sync(this.ttlMs);
-    return this.repo.lock.run(() => loadTemplates(this.repo.dir));
+    if (!(await this.workspace.current())) return { templates: [], errors: [] };
+    return loadTemplates(await this.workspace.dir());
   }
 
   async get(name: string): Promise<Template | undefined> {

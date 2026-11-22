@@ -2,9 +2,9 @@ import { z } from "zod";
 import { GitRef } from "./refs";
 
 /**
- * Sync rules: which files are copied from a source (the workspace repo, another git repo, or a
+ * Sync rules: which files are copied from a source (the workspace folder, another git repo, or a
  * folder on the controller) into a pod at create time. Copy-in only: the one thing saved back
- * on delete is agent memory (marked by the agent's preset), into the workspace repo. Anything
+ * on delete is agent memory (marked by the agent's preset), into the workspace folder. Anything
  * else worth keeping is pushed by the pod itself from a before-destroy hook.
  *
  * Paths:
@@ -16,7 +16,7 @@ import { GitRef } from "./refs";
  * - Globs (`**`, `*`, `?`) are used for `include` and `exclude`; there is no regex anywhere.
  */
 
-/** Rules without `source` read from the workspace repo. */
+/** Rules without `source` read from the workspace folder. */
 export const WORKSPACE_SOURCE = "workspace";
 export const REPO_PLACEHOLDER = "{repo}";
 export const POD_HOME = "~/";
@@ -60,7 +60,7 @@ export const PresetRef = z.object({ preset: z.string().min(1) }).strict();
 export const SyncEntry = z.record(z.string(), z.unknown());
 export type SyncEntryInput = SyncRuleInput | { preset: string };
 
-/** `panem.json` at the root of the workspace repo. */
+/** `panem.json` at the root of the workspace folder. */
 export const PanemConfig = z
   .object({
     sources: z.record(SourceName, SyncSource).default({}),
@@ -89,7 +89,7 @@ export const PRESETS: Record<string, PresetRuleInput[]> = {
     ...["skills", "plans", "agents", "commands"].map(
       (d): PresetRuleInput => ({ from: `${d}/**`, to: `~/.claude/${d}/**` }),
     ),
-    // Claude's per-repo memory: copied in, and saved back to the workspace repo on delete.
+    // Claude's per-repo memory: copied in, and saved back to the workspace folder on delete.
     {
       from: "memory/{repo}/**",
       to: "~/.claude/projects/-codebase-{repo}/memory/**",
@@ -236,10 +236,10 @@ export function validateRule(
     throw new SyncConfigError(`${where}: to "${r.to}" must start with ~/ or /codebase/{repo}/`);
   }
 
-  // Memory is saved back on delete, and only ever into the workspace repo's memory.
+  // Memory is saved back on delete, and only ever into the workspace folder's memory.
   if (r.memory) {
     if (r.source !== WORKSPACE_SOURCE) {
-      throw new SyncConfigError(`${where}: agent memory must come from the workspace repo`);
+      throw new SyncConfigError(`${where}: agent memory must come from the workspace folder`);
     }
     if (!from.isDir || !r.to.startsWith(POD_HOME)) {
       throw new SyncConfigError(`${where}: agent memory must be a folder under ~/`);
@@ -383,7 +383,7 @@ export function mapIn(
   return [...byDest.values()];
 }
 
-/** Map pod files back to workspace-repo paths, for agent memory. First matching rule wins. */
+/** Map pod files back to workspace-folder paths, for agent memory. First matching rule wins. */
 export function mapOut(
   rules: ConcreteRule[],
   podFiles: string[],

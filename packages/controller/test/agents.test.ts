@@ -106,7 +106,7 @@ describe("agents", () => {
     writeFileSync(
       cfgPath,
       JSON.stringify({
-        workspaceRepoUrl: ws.origin,
+        workspaceDir: ws.dir,
         apiToken: "t".repeat(16),
         agentEnv: { OPENAI_API_KEY: "v1" },
       }),
@@ -125,7 +125,7 @@ describe("agents", () => {
     writeFileSync(
       cfgPath,
       JSON.stringify({
-        workspaceRepoUrl: ws.origin,
+        workspaceDir: ws.dir,
         apiToken: "t".repeat(16),
         agentEnv: { OPENAI_API_KEY: "v2" },
       }),

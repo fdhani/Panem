@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import type { Machine, Pod } from "@panem/core";
 import {
   Config,
@@ -8,14 +10,17 @@ import {
   PANEM_VERSION,
   agentCredentials,
   configPath,
+  dataDir,
   loadConfig,
   removeCredential,
   saveConfig,
   setCredential,
+  updateConfig,
   upgradeConfig,
 } from "@panem/core";
 import { defineCommand, runMain } from "citty";
 import { client, table } from "./client";
+import { SCAFFOLD, WORKSPACE_WARN_BYTES } from "./scaffold";
 
 export const VERSION = PANEM_VERSION;
 
@@ -27,20 +32,19 @@ const serve = defineCommand({
     const { serve } = await import("@panem/controller");
     const { cfg, notes } = await upgradeConfig(secret);
     for (const n of notes) console.log(`[panem] ${n}`);
+    if (cfg.workspaceRepoUrl && !cfg.workspaceDir)
+      throw new Error(movedWorkspace(cfg.workspaceRepoUrl));
     await serve(cfg, configPath());
     await new Promise(() => {});
   },
 });
 
 const init = defineCommand({
-  meta: { name: "init", description: "Write ~/.config/panem/config.json" },
+  meta: {
+    name: "init",
+    description: "Set up this controller: ~/.config/panem/config.json (API token and secrets)",
+  },
   args: {
-    "workspace-repo": {
-      type: "string",
-      description: "Git URL of your workspace repo",
-      required: true,
-    },
-    branch: { type: "string", default: "main" },
     port: { type: "string", default: "7420" },
     "claude-token": {
       type: "string",
@@ -68,8 +72,6 @@ const init = defineCommand({
     }
     const claudeToken = args["claude-token"] || process.env.CLAUDE_CODE_OAUTH_TOKEN;
     const cfg = Config.parse({
-      workspaceRepoUrl: args["workspace-repo"],
-      workspaceBranch: args.branch,
       apiToken: secret(),
       relaySecret: secret(),
       forwarderToken: secret(),
@@ -84,15 +86,125 @@ const init = defineCommand({
     });
     await saveConfig(cfg, path);
     console.log(`wrote ${path}`);
-    console.log(`API token (paste into the web UI settings): ${cfg.apiToken}`);
+    console.log(`API token (paste into the web UI's Settings): ${cfg.apiToken}`);
+    console.log("\nNext:");
+    console.log(
+      "  - in the folder you want as the workspace (templates, CLAUDE.md, memory): `panem workspace init`",
+    );
     if (!claudeToken) {
-      console.log("No Claude token set: pods would need a manual `claude /login`. To set one:");
       console.log(
-        "  run `claude setup-token`, then `panem env set CLAUDE_CODE_OAUTH_TOKEN` (or Settings → Agent credentials).",
+        "  - no Claude token yet: run `claude setup-token`, then `panem env set CLAUDE_CODE_OAUTH_TOKEN` (or Settings → Agent credentials)",
       );
     }
   },
 });
+
+/** Configs from when the workspace was a git repo: how to move to a folder. */
+function movedWorkspace(url: string): string {
+  return [
+    "The workspace is now a folder on the controller, not a git repo. To move yours:",
+    `  git clone ${url} ~/panem-workspace`,
+    "  cd ~/panem-workspace && panem workspace init",
+    "Templates, panem.json and memory/ carry over as they are. The clone stays a git repo, so",
+    "you keep its history: commit and push from it whenever you like (Panem won't).",
+  ].join("\n");
+}
+
+const workspace = defineCommand({
+  meta: {
+    name: "workspace",
+    description: "The workspace folder: templates, files copied into pods, saved memory",
+  },
+  subCommands: {
+    show: defineCommand({
+      meta: { name: "show", description: "Print the workspace folder" },
+      async run() {
+        const cfg = await loadConfig();
+        if (cfg.workspaceDir) console.log(cfg.workspaceDir);
+        else if (cfg.workspaceRepoUrl) console.log(movedWorkspace(cfg.workspaceRepoUrl));
+        else console.log("no workspace yet: run `panem workspace init` in a folder");
+      },
+    }),
+    init: defineCommand({
+      meta: {
+        name: "init",
+        description:
+          "Make a folder (default: the current one) the workspace, adding what's missing",
+      },
+      args: { dir: { type: "positional", required: false, description: "Folder (default: .)" } },
+      async run({ args }) {
+        await loadConfig(); // there must be a controller config: `panem init` first
+        const dir = resolve(String(args.dir ?? "."));
+        const why = unsuitableWorkspace(dir);
+        if (why) throw new Error(why);
+        mkdirSync(dir, { recursive: true });
+        const created: string[] = [];
+        for (const [file, content] of Object.entries(SCAFFOLD)) {
+          const p = join(dir, file);
+          if (existsSync(p)) continue;
+          mkdirSync(dirname(p), { recursive: true });
+          writeFileSync(p, content);
+          created.push(file);
+        }
+        const before = (await loadConfig()).workspaceDir;
+        await updateConfig((c) => {
+          const { workspaceRepoUrl: _, workspaceBranch: __, ...rest } = c;
+          return { ...rest, workspaceDir: dir };
+        });
+        console.log(
+          before === dir
+            ? `${dir} is already the workspace`
+            : `workspace: ${dir}${before ? ` (was ${before})` : ""}`,
+        );
+        if (created.length) console.log(`added: ${created.join(", ")}`);
+        const size = folderBytes(dir, WORKSPACE_WARN_BYTES);
+        if (size > WORKSPACE_WARN_BYTES) {
+          console.warn(
+            `warning: this folder is over ${WORKSPACE_WARN_BYTES / 1024 / 1024} MB. DevPod uploads the whole workspace to a machine for every pod: keep it to templates, CLAUDE.md, skills and memory.`,
+          );
+        }
+        console.log(
+          "DevPod uploads this folder to machines when summoning: keep it small, and keep secrets out (use `panem env set`).",
+        );
+        if (created.includes("templates/example/template.json")) {
+          console.log("Next: edit templates/example/template.json to list your repos.");
+        }
+      },
+    }),
+  },
+});
+
+/** Why a folder can't be the workspace (it's uploaded to machines), or undefined if it can. */
+function unsuitableWorkspace(dir: string): string | undefined {
+  const real = (p: string) => (existsSync(p) ? realpathSync(p) : p);
+  const d = real(dir);
+  if (d === "/") return "the workspace can't be / (it's uploaded to machines for every pod)";
+  if (d === real(homedir())) {
+    return "the workspace can't be your home folder: it's uploaded to machines for every pod. Use a folder of its own, e.g. ~/panem-workspace";
+  }
+  for (const secret of [configPath(), dataDir()]) {
+    const s = real(secret);
+    if (s === d || s.startsWith(`${d}/`)) {
+      return `${secret} is inside ${dir}: the workspace is uploaded to machines, so it can't hold Panem's config or data. Use another folder.`;
+    }
+  }
+  return undefined;
+}
+
+/** Total size of files under dir, stopping early once over `limit`. */
+function folderBytes(dir: string, limit: number): number {
+  let total = 0;
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (total > limit) return;
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile()) total += statSync(p).size;
+    }
+  };
+  walk(dir);
+  return total;
+}
 
 /** Read a secret without it ever being a command-line argument: stdin, or a hidden prompt. */
 async function readSecret(name: string): Promise<string> {
@@ -373,7 +485,7 @@ const rediscover = defineCommand({
 
 export const main = defineCommand({
   meta: { name: "panem", version: VERSION, description: "Agent pods on your own machines" },
-  subCommands: { serve, init, token, env, machine, pod, rediscover },
+  subCommands: { serve, init, workspace, token, env, machine, pod, rediscover },
 });
 
 if (import.meta.main) runMain(main);

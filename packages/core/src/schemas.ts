@@ -90,7 +90,7 @@ export const Template = z.object({
   hooks: TemplateHooks.optional(),
   /** Added to panem.json's `exclude` for pods of this template. */
   syncExclude: z.array(z.string().min(1)).optional(),
-  /** Path inside the workspace repo, relative to its root. Defaults to the template's .devcontainer folder. */
+  /** Path inside the workspace folder, relative to it. Defaults to the template's .devcontainer folder. */
   devcontainerPath: z.string().min(1).optional(),
 });
 export type Template = z.infer<typeof Template>;
@@ -137,8 +137,8 @@ export const PodMeta = z.object({
   machine: z.string(),
   /** Primary repo first. */
   repos: z.array(z.object({ name: z.string(), url: z.string(), ref: z.string() })),
-  /** Workspace repo commit the pod's context was taken from (base for 3-way export merge). */
-  workspaceSha: z.string(),
+  /** Pods from when the workspace was a git repo: the commit they were given. Unused now. */
+  workspaceSha: z.string().optional(),
   createdAt: z.string(),
   ports: PortNames.optional(),
   ignorePorts: z.array(PortNumber).optional(),
@@ -149,7 +149,7 @@ export const PodMeta = z.object({
   exposePorts: z.array(PortNumber).optional(),
   /**
    * The sync rules and sources resolved at summon, plus what was sent (merge bases).
-   * Export uses this, never the workspace repo's current panem.json. Absent on older pods.
+   * Export uses this, never the workspace's current panem.json. Absent on older pods.
    */
   sync: ResolvedSync.optional(),
   /** The template's hooks as they were at summon (delete runs these, not today's template). */
@@ -198,9 +198,14 @@ export const Job = z.object({
 export type Job = z.infer<typeof Job>;
 
 export const Config = z.object({
-  workspaceRepoUrl: z.string().min(1),
-  /** Branch of the workspace repo used for templates and memory. */
-  workspaceBranch: z.string().default("main"),
+  /**
+   * The workspace folder on the controller (absolute): templates, panem.json, files copied
+   * into pods, and saved agent memory. Set by `panem workspace init`.
+   */
+  workspaceDir: z.string().optional(),
+  /** Older configs: the workspace was a git repo. Only read to explain how to move it. */
+  workspaceRepoUrl: z.string().optional(),
+  workspaceBranch: z.string().optional(),
   apiToken: z.string().min(16),
   /** Kept for older configs: same as agentEnv.CLAUDE_CODE_OAUTH_TOKEN. */
   claudeOauthToken: z.string().optional(),

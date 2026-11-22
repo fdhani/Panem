@@ -48,10 +48,10 @@ export class Mutex {
 }
 
 /**
- * The controller's clone of the workspace repo. It always mirrors origin/<branch>:
+ * A controller clone of a git sync source (panem.json "sources"). It always mirrors origin/<branch>:
  * every sync hard-resets to the remote, so a failed export never leaves local state behind.
  */
-export class WorkspaceRepo {
+export class GitRepo {
   readonly lock = new Mutex();
   private lastSync = 0;
 
