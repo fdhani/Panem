@@ -139,15 +139,7 @@ export class DevPodBackend implements PodBackend {
       return;
     }
     const target = m.user ? `${m.user}@${m.host}` : m.host;
-    await this.run([
-      "provider",
-      "add",
-      "ssh",
-      "--name",
-      m.name,
-      "-o",
-      `HOST=${target}`,
-    ]);
+    await this.run(["provider", "add", "ssh", "--name", m.name, "-o", `HOST=${target}`]);
   }
 
   async removeMachine(name: string): Promise<void> {
