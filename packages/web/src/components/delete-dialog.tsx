@@ -46,7 +46,6 @@ export function DeleteDialog({
       { label: "Retry", choice: "retry", variant: "primary" },
       { label: "Force delete", choice: "force", variant: "danger" },
     ];
-    note = '"Force delete" skips the before-destroy hooks and the memory save.';
   } else if (memory) {
     text =
       "Any before-destroy hooks run first. The agent's memory can be saved to the workspace repo.";
