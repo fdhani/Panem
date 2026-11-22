@@ -178,13 +178,15 @@ Work other than agent memory that should outlive a pod is pushed **by the pod it
 **Order on delete:**
 1. Agent hooks, in name order.
 2. The template's hook.
-3. Agent memory is saved.
+3. Agent memory is saved, unless you chose **Delete without saving memory** (`panem pod rm --no-memory`).
 4. The pod is deleted.
+
+Hooks run on every delete; there's nothing to confirm. Only **Force delete** (`panem pod rm --force`) skips them, along with the memory save. It's for when hooks can't run: the machine is offline, or a hook keeps failing.
 
 **How hooks run:**
 - Each hook gets 10 minutes. Full output goes to `~/.panem/before-destroy.log` in the pod.
 - They run over `devpod ssh`, so the controller's git credentials are forwarded, the same way code repos are cloned at setup.
-- A failing hook keeps the pod and shows its last output lines on the card. **Retry** runs the hooks and the memory save again, so hooks should be idempotent (`git commit` + `git push` naturally is). **Delete without saving** skips them.
+- A failing hook keeps the pod and shows its last output lines on the card. **Retry** runs the hooks (and the memory save, if chosen) again, so hooks should be idempotent (`git commit` + `git push` naturally is). **Force delete** skips them.
 - The hook a pod runs is the one its template had at summon.
 
 **Example: push overlay work (e.g. new spec-kit specs) back to an overlay repo.** Panem records the files it overlaid in `~/.panem/overlays/<repo>.list`.

@@ -179,6 +179,8 @@ export const Job = z.object({
   podId: z.string(),
   status: JobStatus,
   attempts: z.number().int().default(0),
+  /** Save agent memory before deleting. Before-destroy hooks run either way. */
+  saveMemory: z.boolean().default(true),
   error: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),

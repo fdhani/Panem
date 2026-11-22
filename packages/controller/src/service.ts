@@ -588,10 +588,15 @@ export class PodService {
   }
 
   /**
-   * Delete = export memory, then remove. Offline machines block delete unless forced;
-   * force skips export and discards the pod's memory.
+   * Delete = before-destroy hooks, then (unless `saveMemory` is false) save agent memory, then
+   * remove. Hooks always run; only `force` skips them, along with the memory save. It's for when
+   * hooks can't run: the machine is offline, or a hook keeps failing.
    */
-  async delete(id: string, force = false): Promise<Pod | undefined> {
+  async delete(
+    id: string,
+    opts: { force?: boolean; saveMemory?: boolean } = {},
+  ): Promise<Pod | undefined> {
+    const force = opts.force ?? false;
     const pod = this.get(id);
     const op = this.ops.get(id);
     if (op && op.state !== "error" && !force) {
@@ -605,19 +610,26 @@ export class PodService {
     if (pod.machineStatus === "offline") {
       throw new HttpError(
         409,
-        "machine is offline, so memory can't be saved. Delete without saving to discard it.",
+        "machine is offline, so before-destroy hooks can't run and memory can't be saved. Force delete to remove it anyway.",
       );
     }
     const existing = this.d.jobs.forPod(id);
     const now = new Date().toISOString();
     const job: Job = existing
-      ? { ...existing, status: "pending", error: undefined, updatedAt: now }
+      ? {
+          ...existing,
+          status: "pending",
+          error: undefined,
+          saveMemory: opts.saveMemory ?? existing.saveMemory,
+          updatedAt: now,
+        }
       : {
           id: `job-${id}-${Date.now()}`,
           kind: "export-delete",
           podId: id,
           status: "pending",
           attempts: 0,
+          saveMemory: opts.saveMemory ?? true,
           createdAt: now,
           updatedAt: now,
         };
@@ -692,13 +704,17 @@ export class PodService {
         }
         this.setOp(meta.id, { state: "exporting" });
         await this.runBeforeDestroy(meta);
-        const r = await exportPod({ backend: this.d.backend, repo: this.d.repo }, meta);
-        for (const n of r.notes) this.log(`${meta.id}: ${n}`);
-        this.log(
-          r.files.length
-            ? `saved ${r.files.length} memory file(s) from ${meta.id} (${r.commit?.slice(0, 8)})`
-            : `no memory changes in ${meta.id}`,
-        );
+        if (job.saveMemory) {
+          const r = await exportPod({ backend: this.d.backend, repo: this.d.repo }, meta);
+          for (const n of r.notes) this.log(`${meta.id}: ${n}`);
+          this.log(
+            r.files.length
+              ? `saved ${r.files.length} memory file(s) from ${meta.id} (${r.commit?.slice(0, 8)})`
+              : `no memory changes in ${meta.id}`,
+          );
+        } else {
+          this.log(`deleting ${meta.id} without saving memory`);
+        }
       }
       this.setOp(job.podId, { state: "deleting" });
       await this.d.backend.delete(job.podId);

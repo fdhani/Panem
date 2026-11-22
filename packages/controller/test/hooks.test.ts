@@ -27,8 +27,8 @@ async function summon(ctl: Ctl): Promise<Pod> {
   return ctl.service.get(pod.id);
 }
 
-async function del(ctl: Ctl, id: string, force = false) {
-  await ctl.req("DELETE", `/api/pods/${id}${force ? "?force=true" : ""}`);
+async function del(ctl: Ctl, id: string, query = "") {
+  await ctl.req("DELETE", `/api/pods/${id}${query}`);
   await ctl.service.idle();
 }
 
@@ -111,14 +111,51 @@ describe("before-destroy hooks", () => {
     expect(ctl.service.get(pod.id).error).toContain("timed out after 1s");
   });
 
-  test("delete without saving works on a running pod and skips hooks and the memory save", async () => {
+  test("delete without saving memory still runs the hooks", async () => {
+    const ws = workspaceWithHook('touch "$HOME/hooked"');
+    const ctl = await makeController(ws);
+    const pod = await summon(ctl);
+    ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "- not saved\n");
+    const home = ctl.backend.home(pod.id);
+    let hooked = false;
+    const orig = ctl.backend.delete.bind(ctl.backend);
+    ctl.backend.delete = async (id, o) => {
+      hooked = existsSync(join(home, "hooked"));
+      return orig(id, o);
+    };
+    const before = ws.log();
+    await del(ctl, pod.id, "?memory=false");
+    expect(hooked).toBe(true);
+    expect(ctl.backend.events).toContain(`before-destroy:${pod.id}`);
+    expect(ctl.backend.events).not.toContain(`save-memory:${pod.id}`);
+    expect(ctl.service.podList()).toEqual([]);
+    expect(ws.log()).toBe(before);
+  });
+
+  test("a failed hook on a delete without memory: retry still skips memory", async () => {
+    const ws = workspaceWithHook('[ -f "$HOME/ok" ] || exit 1');
+    const ctl = await makeController(ws);
+    const pod = await summon(ctl);
+    ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "- not saved\n");
+    const before = ws.log();
+    await del(ctl, pod.id, "?memory=false");
+    expect(ctl.service.get(pod.id).state).toBe("error");
+    ctl.backend.writePodFile(pod.id, "~/ok", "");
+    await ctl.req("POST", `/api/pods/${pod.id}/retry-export`);
+    await ctl.service.idle();
+    expect(ctl.service.podList()).toEqual([]);
+    expect(ctl.backend.events).not.toContain(`save-memory:${pod.id}`);
+    expect(ws.log()).toBe(before);
+  });
+
+  test("force delete works on a running pod and skips hooks and the memory save", async () => {
     const ws = workspaceWithHook("exit 1");
     const ctl = await makeController(ws);
     const pod = await summon(ctl);
     expect(pod.state).toBe("running");
     ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "- not saved\n");
     const before = ws.log();
-    await del(ctl, pod.id, true);
+    await del(ctl, pod.id, "?force=true");
     expect(ctl.service.podList()).toEqual([]);
     expect(ctl.backend.pods.has(pod.id)).toBe(false);
     expect(ctl.backend.events).not.toContain(`before-destroy:${pod.id}`);

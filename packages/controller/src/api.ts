@@ -98,8 +98,10 @@ export function createApp(d: ApiDeps): Hono {
     return c.json(pod ?? null, 202);
   });
   app.delete("/api/pods/:id", async (c) => {
-    const force = c.req.query("force") === "true";
-    const pod = await service.delete(c.req.param("id"), force);
+    const pod = await service.delete(c.req.param("id"), {
+      force: c.req.query("force") === "true",
+      saveMemory: c.req.query("memory") !== "false",
+    });
     return pod ? c.json(pod, 202) : c.body(null, 204);
   });
   app.post("/api/rediscover", async (c) => c.json(await service.rediscover()));

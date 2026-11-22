@@ -59,7 +59,8 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
   const action = useMutation({
     mutationFn: async (a: "stop" | "start" | DeleteChoice) => {
       if (a === "save") return api("DELETE", `/api/pods/${pod.id}`);
-      if (a === "discard") return api("DELETE", `/api/pods/${pod.id}?force=true`);
+      if (a === "nomemory") return api("DELETE", `/api/pods/${pod.id}?memory=false`);
+      if (a === "force") return api("DELETE", `/api/pods/${pod.id}?force=true`);
       if (a === "retry") return api("POST", `/api/pods/${pod.id}/retry-export`);
       return api("POST", `/api/pods/${pod.id}/${a}`);
     },
@@ -182,7 +183,7 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
       )}
       {offline && (
         <p className="text-xs text-muted">
-          Machine is offline. Deleting now can't save anything from the pod.
+          Machine is offline. Deleting now skips its before-destroy hooks and memory.
         </p>
       )}
     </Card>

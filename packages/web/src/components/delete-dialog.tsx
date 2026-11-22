@@ -2,15 +2,19 @@ import type { Pod } from "@panem/core";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
 
-export type DeleteChoice = "save" | "discard" | "retry";
+export type DeleteChoice = "save" | "nomemory" | "force" | "retry";
 
-/** What deleting this pod would save first: agent memory and/or a template hook. */
-export function whatWouldSave(pod: Pod): { memory: boolean; hook: boolean } {
+/** Whether deleting this pod can save agent memory. */
+export function hasMemory(pod: Pod): boolean {
   // Pods from before sync rules have no snapshot: they're on the defaults, which keep memory.
-  const memory = pod.sync ? pod.sync.rules.some((r) => r.memory) : true;
-  return { memory, hook: Boolean(pod.hooks?.beforeDestroy) };
+  return pod.sync ? pod.sync.rules.some((r) => r.memory) : true;
 }
 
+/**
+ * Before-destroy hooks run on every delete, so the only choice is memory. Force delete (skips
+ * hooks too) is offered only when hooks can't run: the machine is offline, or the last attempt
+ * failed.
+ */
 export function DeleteDialog({
   pod,
   open,
@@ -24,19 +28,37 @@ export function DeleteDialog({
   onClose: () => void;
   onChoose: (c: DeleteChoice) => void;
   busy: boolean;
-  /** The last save (hooks or memory) failed; offer to retry it. */
+  /** The last attempt (hooks or memory save) failed. */
   saveFailed: boolean;
 }) {
   const offline = pod.machineStatus === "offline";
-  const { memory, hook } = whatWouldSave(pod);
-  const saves = memory || hook;
-  const steps = [
-    hook && "runs the template's before-destroy hook",
-    memory && "saves the agent's memory to the workspace repo",
-  ].filter(Boolean);
-  const lost = memory
-    ? "Memory the agent built in this pod will be lost."
-    : "The before-destroy hook won't run.";
+  const memory = hasMemory(pod);
+
+  let text: string;
+  let buttons: { label: string; choice: DeleteChoice; variant: "primary" | "danger" }[];
+  let note: string | undefined;
+  if (offline) {
+    text = "Its machine is offline, so before-destroy hooks can't run and memory can't be saved.";
+    buttons = [{ label: "Force delete", choice: "force", variant: "danger" }];
+  } else if (saveFailed) {
+    text = "The last attempt failed. Retry runs the before-destroy hooks again.";
+    buttons = [
+      { label: "Retry", choice: "retry", variant: "primary" },
+      { label: "Force delete", choice: "force", variant: "danger" },
+    ];
+    note = '"Force delete" skips the before-destroy hooks and the memory save.';
+  } else if (memory) {
+    text =
+      "Any before-destroy hooks run first. The agent's memory can be saved to the workspace repo.";
+    buttons = [
+      { label: "Save memory & delete", choice: "save", variant: "primary" },
+      { label: "Delete without saving memory", choice: "nomemory", variant: "danger" },
+    ];
+    note = '"Delete without saving memory": memory the agent built in this pod will be lost.';
+  } else {
+    text = "Any before-destroy hooks run first. Everything else in the pod is removed with it.";
+    buttons = [{ label: "Delete", choice: "save", variant: "danger" }];
+  }
 
   return (
     <Dialog open={open} onClose={onClose} title={`Delete ${pod.id}?`}>
@@ -44,43 +66,23 @@ export function DeleteDialog({
         {saveFailed && pod.error && (
           <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">{pod.error}</p>
         )}
-        {offline ? (
-          <p className="text-sm text-muted">
-            Its machine is offline, so nothing can be saved first.{saves ? ` ${lost}` : ""}
-          </p>
-        ) : saves ? (
-          <p className="text-sm text-muted">
-            Deleting first {steps.join(", then ")}. Synced files and anything else in the pod are
-            removed with it.
-          </p>
-        ) : (
-          <p className="text-sm text-muted">
-            Nothing in this pod is saved back; it's removed with everything in it.
-          </p>
-        )}
-
+        <p className="text-sm text-muted">{text}</p>
         <div className="flex flex-col gap-2">
-          {!offline && saves && (
+          {buttons.map((b) => (
             <Button
-              variant="primary"
+              key={b.choice}
+              variant={b.variant}
               disabled={busy}
-              onClick={() => onChoose(saveFailed ? "retry" : "save")}
+              onClick={() => onChoose(b.choice)}
             >
-              {saveFailed
-                ? "Retry save & delete"
-                : memory
-                  ? "Save memory & delete"
-                  : "Run hook & delete"}
+              {b.label}
             </Button>
-          )}
-          <Button variant="danger" disabled={busy} onClick={() => onChoose("discard")}>
-            {saves ? "Delete without saving" : "Delete"}
-          </Button>
+          ))}
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
         </div>
-        {saves && !offline && <p className="text-xs text-muted">"Delete without saving": {lost}</p>}
+        {note && <p className="text-xs text-muted">{note}</p>}
       </div>
     </Dialog>
   );

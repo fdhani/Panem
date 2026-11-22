@@ -283,17 +283,33 @@ const pod = defineCommand({
       },
     }),
     rm: defineCommand({
-      meta: { name: "rm", description: "Export memory, then delete a pod" },
+      meta: {
+        name: "rm",
+        description: "Run before-destroy hooks, save agent memory, then delete a pod",
+      },
       args: {
         ...podId,
-        force: { type: "boolean", description: "Skip export and discard memory" },
+        memory: {
+          type: "boolean",
+          default: true,
+          description: "Save agent memory; --no-memory skips it (hooks still run)",
+        },
+        force: {
+          type: "boolean",
+          description: "Skip hooks and memory (machine offline or a hook keeps failing)",
+        },
       },
       async run({ args }) {
-        await (await client()).call(
-          "DELETE",
-          `/api/pods/${args.id}${args.force ? "?force=true" : ""}`,
+        const noMemory = args.memory === false;
+        const q = args.force ? "?force=true" : noMemory ? "?memory=false" : "";
+        await (await client()).call("DELETE", `/api/pods/${args.id}${q}`);
+        console.log(
+          args.force
+            ? `deleted ${args.id}`
+            : noMemory
+              ? `deleting ${args.id} without saving memory`
+              : `saving memory and deleting ${args.id}`,
         );
-        console.log(args.force ? `deleted ${args.id}` : `exporting and deleting ${args.id}`);
       },
     }),
     expose: defineCommand({
