@@ -18,12 +18,15 @@ import {
   machineProviderName,
   newPodId,
   resolveRefs,
+  resolveSync,
 } from "@panem/core";
-import { exportMemory } from "./exporter";
+import { ExportError, exportPod } from "./exporter";
 import type { Forwarders, MachineRef } from "./forwarders";
 import type { WorkspaceRepo } from "./git";
 import type { HostProbe } from "./probe";
+import type { Sources } from "./sources";
 import type { JobStore, PodStore } from "./stores";
+import { syncIn } from "./sync-in";
 import type { Templates } from "./templates";
 
 export class HttpError extends Error {
@@ -50,6 +53,7 @@ export interface ServiceDeps {
   claudeOauthToken?: string;
   relaySecret?: string;
   forwarders?: Forwarders;
+  sources: Sources;
   log?: (msg: string) => void;
 }
 
@@ -409,8 +413,14 @@ export class PodService {
   }
 
   async summon(req: SummonRequest): Promise<Pod> {
-    const template = await this.d.templates.get(req.template);
+    const { template, panem } = await this.d.templates.getWithConfig(req.template);
     if (!template) throw new HttpError(404, `template ${req.template} not found`);
+    let sync: PodMeta["sync"];
+    try {
+      sync = resolveSync(panem, template);
+    } catch (e) {
+      throw new HttpError(400, msg(e));
+    }
     const machines = await this.refreshMachines();
     const machine = machines.find((m) => m.name === req.machine);
     if (!machine) throw new HttpError(404, `machine ${req.machine} not registered`);
@@ -434,6 +444,7 @@ export class PodService {
       exposePorts: Object.keys(template.ports ?? {})
         .map(Number)
         .sort((a, b) => a - b),
+      sync,
     });
     await this.d.pods.put(meta);
     this.setOp(meta.id, { state: "creating" });
@@ -450,6 +461,9 @@ export class PodService {
         devcontainerPath: devcontainerPathFor(template),
         env,
       })
+      // Setup has run; place synced files before the start hook launches the agent.
+      .then(() => this.syncIntoPod(meta))
+      .then(() => this.d.backend.runHook(meta.id, "start"))
       .then(
         () => {
           this.lastStatus.set(meta.id, "running");
@@ -463,6 +477,15 @@ export class PodService {
         },
       );
     return this.get(meta.id);
+  }
+
+  /** Copy synced files in and record what was sent (the export's merge bases). */
+  private async syncIntoPod(meta: PodMeta): Promise<void> {
+    const r = await syncIn({ backend: this.d.backend, sources: this.d.sources }, meta);
+    const current = this.d.pods.get(meta.id) ?? meta;
+    await this.d.pods.put({ ...current, sync: r.sync, workspaceSha: r.workspaceSha });
+    for (const n of r.notes) this.log(`${meta.id}: ${n}`);
+    this.log(`synced ${r.files} file(s) into ${meta.id}`);
   }
 
   private upsertBackend(p: BackendPod) {
@@ -556,6 +579,7 @@ export class PodService {
   }
 
   private async forget(id: string) {
+    await this.d.sources.removeSnapshots(id).catch(() => {});
     // Free the pod's port block on its machine (best effort: the machine may be gone).
     const meta = this.d.pods.get(id) ?? this.podList().find((p) => p.id === id);
     const machine = meta && this.machineCache.find((m) => m.name === meta.machine);
@@ -613,12 +637,21 @@ export class PodService {
           await this.d.backend.start(meta.id);
         }
         this.setOp(meta.id, { state: "exporting" });
-        const r = await exportMemory(this.d.backend, this.d.repo, meta);
-        this.log(
-          r.commit
-            ? `exported ${r.files.length} memory file(s) from ${meta.id} (${r.commit.slice(0, 8)})`
-            : `no memory changes in ${meta.id}`,
-        );
+        try {
+          const r = await exportPod({ backend: this.d.backend, sources: this.d.sources }, meta, {
+            done: job.exported,
+            onSourceDone: (name) => update({ exported: [...(job?.exported ?? []), name] }),
+          });
+          for (const n of r.notes) this.log(`${meta.id}: ${n}`);
+          this.log(
+            r.files.length
+              ? `exported ${r.files.length} file(s) from ${meta.id}: ${r.files.join(", ")}`
+              : `nothing to export from ${meta.id}`,
+          );
+        } catch (e) {
+          if (e instanceof ExportError) await update({ exported: e.done });
+          throw e;
+        }
       }
       this.setOp(job.podId, { state: "deleting" });
       await this.d.backend.delete(job.podId);

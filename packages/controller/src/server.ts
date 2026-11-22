@@ -8,6 +8,7 @@ import { MockBackend, MockForwarders } from "./mock-backend";
 import { type HostProbe, StaticProbe, TailscaleProbe, tailscaleIPv4 } from "./probe";
 import { PodService } from "./service";
 import { SshShell } from "./shell";
+import { Sources } from "./sources";
 import { JobStore, PodStore } from "./stores";
 import { Templates } from "./templates";
 import { loadUi } from "./ui";
@@ -38,6 +39,7 @@ export async function createController(o: ControllerOptions) {
     o.config.workspaceBranch,
   );
   const templates = new Templates(repo);
+  const sources = new Sources({ dataDir: dir, workspace: repo });
   const service = new PodService({
     backend,
     repo,
@@ -48,6 +50,7 @@ export async function createController(o: ControllerOptions) {
     claudeOauthToken: o.config.claudeOauthToken,
     relaySecret: o.config.relaySecret,
     forwarders,
+    sources,
     log: o.log,
   });
   const app = createApp({ service, templates, apiToken: o.config.apiToken, ui: await loadUi() });

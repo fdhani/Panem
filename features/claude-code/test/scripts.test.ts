@@ -77,16 +77,15 @@ afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("post-create clones repos at refs and materializes context", () => {
+test("post-create clones repos at refs, and leaves synced files to the controller", () => {
   sh(`bash ${scripts}/post-create.sh`, root, env);
   expect(readFileSync(join(ws, "api/f.txt"), "utf8")).toBe("hi\n");
   expect(existsSync(join(ws, "web/f.txt"))).toBe(false);
-  expect(readFileSync(join(home, ".claude/CLAUDE.md"), "utf8")).toBe("# global\n");
-  const projDir = ws.replace(/[^A-Za-z0-9-]/g, "-");
-  expect(readFileSync(join(home, `.claude/projects/${projDir}-api/memory/MEMORY.md`), "utf8")).toBe(
-    "- fact\n",
-  );
-  expect(existsSync(join(home, ".claude/skills/deploy/SKILL.md"))).toBe(true);
+  // The workspace repo checkout (ctx) has CLAUDE.md, skills and memory, but copying them is
+  // now the controller's job (sync rules), between this script and the start hook.
+  expect(existsSync(join(home, ".claude/CLAUDE.md"))).toBe(false);
+  expect(existsSync(join(home, ".claude/skills"))).toBe(false);
+  expect(existsSync(join(home, ".claude/projects"))).toBe(false);
   const cj = JSON.parse(readFileSync(join(home, ".claude.json"), "utf8"));
   expect(cj.hasCompletedOnboarding).toBe(true);
   expect(cj.projects[`${ws}/api`].hasTrustDialogAccepted).toBe(true);

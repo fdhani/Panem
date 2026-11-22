@@ -11,6 +11,8 @@ export interface RunOptions {
   env?: Record<string, string>;
   /** Throw BackendError on non-zero exit (default true). */
   check?: boolean;
+  /** Bytes to write to the process's stdin. */
+  stdin?: Uint8Array;
 }
 
 /** Spawn a CLI without a shell. Arguments are never interpolated into a command string. */
@@ -18,7 +20,7 @@ export async function run(bin: string, args: string[], opts: RunOptions = {}): P
   const proc = Bun.spawn([bin, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    stdin: "ignore",
+    stdin: opts.stdin ?? "ignore",
     env: { ...process.env, ...opts.env },
   });
   const output = Promise.all([

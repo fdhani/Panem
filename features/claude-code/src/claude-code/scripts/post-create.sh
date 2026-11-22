@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # postCreateCommand: runs once, as the remote user, after the container is created.
 # 1. Clone each repo at its ref into /codebase/<repo> (only pushed work is reachable).
-# 2. Materialize context from the workspace repo into ~/.claude.
+# 2. (Synced files arrive later: the controller copies them in, per its sync rules.)
 # 3. Pre-trust /codebase/* so Remote Control can start without a prompt.
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -26,7 +26,6 @@ if [ ! -w "$PANEM_CODE_ROOT" ]; then
 fi
 
 POD="$(pod_json)"
-CONTEXT_DIR="${PANEM_CONTEXT_DIR:-$PWD}"
 
 # ---- 1. repos ----
 count="$(printf '%s' "$POD" | jq '.repos | length // 0')"
@@ -48,24 +47,8 @@ for i in $(seq 0 $((count - 1))); do
 done
 
 # ---- 2. context ----
-if [ -f "$CONTEXT_DIR/CLAUDE.md" ]; then
-  cp "$CONTEXT_DIR/CLAUDE.md" "$CLAUDE_HOME/CLAUDE.md"
-fi
-for dir in skills plans agents commands; do
-  if [ -d "$CONTEXT_DIR/$dir" ]; then
-    mkdir -p "$CLAUDE_HOME/$dir"
-    cp -R "$CONTEXT_DIR/$dir/." "$CLAUDE_HOME/$dir/"
-  fi
-done
-if [ -d "$CONTEXT_DIR/memory" ]; then
-  for repo_mem in "$CONTEXT_DIR"/memory/*/; do
-    [ -d "$repo_mem" ] || continue
-    repo="$(basename "$repo_mem")"
-    target="$CLAUDE_HOME/projects/$(claude_project_dir "$PANEM_CODE_ROOT/$repo")/memory"
-    mkdir -p "$target"
-    cp -R "$repo_mem." "$target/"
-  done
-fi
+# CLAUDE.md, skills, memory and any other synced files are copied in by the controller after
+# this script and before the start hook, following the workspace repo's sync rules.
 
 # ---- 3. claude settings: onboarding done, /codebase/* trusted ----
 CLAUDE_JSON="$HOME/.claude.json"

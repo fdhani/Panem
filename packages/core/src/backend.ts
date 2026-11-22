@@ -39,6 +39,13 @@ export interface PodBackend {
   stop(id: string): Promise<void>;
   delete(id: string, opts?: { force?: boolean }): Promise<void>;
   exec(id: string, command: string): Promise<ExecResult>;
+  /** Run `command` in the pod with `data` on its stdin (e.g. a tar to unpack). */
+  upload(id: string, data: Uint8Array, command: string): Promise<ExecResult>;
+  /**
+   * Run a pod lifecycle hook. `up` runs only the one-time setup, so the controller can place
+   * synced files before "start" launches the agent; `start()` runs "start" itself.
+   */
+  runHook(id: string, hook: "start"): Promise<void>;
 
   addMachine(m: BackendMachine): Promise<void>;
   removeMachine(name: string): Promise<void>;

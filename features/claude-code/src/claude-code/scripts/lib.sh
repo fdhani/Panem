@@ -28,8 +28,6 @@ export PATH="$HOME/.local/bin:$PATH"
 
 log() { printf '[panem] %s\n' "$*" >&2; }
 
-# Claude Code names a project's folder after its path with every non-alphanumeric char as "-".
-claude_project_dir() { printf '%s' "$1" | sed 's/[^A-Za-z0-9-]/-/g'; }
 
 pod_json() {
   if [ -n "${PANEM_POD:-}" ]; then

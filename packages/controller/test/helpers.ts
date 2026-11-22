@@ -58,6 +58,7 @@ export function makeWorkspace() {
     pushFrom(name: string, file: string, content: string) {
       const dir = join(root, name);
       sh(root, `rm -rf ${name} && git clone -q ${origin} ${name}`);
+      mkdirSync(join(dir, file, ".."), { recursive: true });
       writeFileSync(join(dir, file), content);
       sh(dir, `git add -A && ${G} commit -qm ext && git push -q origin main`);
     },
@@ -135,3 +136,25 @@ export const noForwarders: Forwarders = {
   },
   remove: async () => {},
 };
+
+/** An extra git repo (e.g. a claude-overlay source), optionally seeded with files. */
+export function makeRepo(root: string, name: string, files?: Record<string, string>) {
+  const origin = join(root, `${name}.git`);
+  sh(root, `git init -q --bare -b main ${origin}`);
+  if (files) {
+    const seed = join(root, `${name}-seed`);
+    for (const [p, c] of Object.entries(files)) {
+      mkdirSync(join(seed, p, ".."), { recursive: true });
+      writeFileSync(join(seed, p), c);
+    }
+    sh(
+      seed,
+      `git init -q -b main && git add -A && ${G} commit -qm seed && git push -q ${origin} main`,
+    );
+  }
+  return {
+    origin,
+    read: (file: string) => sh(root, `git --git-dir=${origin} show main:${file}`),
+    log: () => sh(root, `git --git-dir=${origin} log --format=%s main 2>/dev/null || true`),
+  };
+}

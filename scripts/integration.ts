@@ -1,14 +1,23 @@
 // End-to-end test against a real DevPod + Docker (run in CI; needs network for images).
-// Exercises: machine add, up with the claude-code Feature, context injection, stop/start,
-// port exposure through the per-machine forwarder, memory export to a bare git repo, delete.
+// Exercises: machine add, up with the claude-code Feature, upload over devpod ssh, sync rules
+// copying in from three kinds of source (workspace repo, an overlay git repo, a folder),
+// stop/start, port exposure through the per-machine forwarder, export back to all three
+// sources, delete.
 // Needs the forwarder image built locally first (see .github/workflows/ci.yml).
 //   DEVPOD=/path/to/devpod bun scripts/integration.ts
 import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
-import { ForwarderManager, SshShell, WorkspaceRepo, exportMemory } from "@panem/controller";
-import { Config, PANEM_VERSION } from "@panem/core";
+import {
+  ForwarderManager,
+  Sources,
+  SshShell,
+  WorkspaceRepo,
+  exportPod,
+  syncIn,
+} from "@panem/controller";
+import { Config, PANEM_VERSION, resolveSync } from "@panem/core";
 import { type PodMeta, claudeProjectDir, repoPath } from "@panem/core";
 
 const root = mkdtempSync(join(tmpdir(), "panem-it-"));
@@ -42,6 +51,36 @@ writeFileSync(
 writeFileSync(join(src, "CLAUDE.md"), "# integration\n");
 writeFileSync(join(src, "memory/hello/MEMORY.md"), "- seeded fact\n");
 writeFileSync(join(src, ".gitattributes"), "memory/** merge=union\n");
+
+// An overlay repo for the code repo "hello" (Hello-World tracks README, so that one must be
+// skipped), and a folder source on the "controller".
+const G = "git -c user.email=t@t -c user.name=t";
+const overlayOrigin = join(root, "overlay.git");
+const overlaySeed = join(root, "overlay-seed");
+mkdirSync(join(overlaySeed, "hello/.specify"), { recursive: true });
+writeFileSync(join(overlaySeed, "hello/CLAUDE.md"), "# hello overlay\n");
+writeFileSync(join(overlaySeed, "hello/.specify/constitution.md"), "be kind\n");
+writeFileSync(join(overlaySeed, "hello/README"), "overlay must not replace this\n");
+sh(root, `git init -q --bare -b main ${overlayOrigin}`);
+sh(
+  overlaySeed,
+  `git init -q -b main && git add -A && ${G} commit -qm seed && git push -q ${overlayOrigin} main`,
+);
+const folder = join(root, "claude-context");
+mkdirSync(join(folder, "skills/review"), { recursive: true });
+writeFileSync(join(folder, "skills/review/SKILL.md"), "review\n");
+writeFileSync(join(folder, "notes.md"), "base\n");
+const panem = {
+  sources: { overlay: { git: overlayOrigin, ref: "main" }, local: { dir: folder } },
+  sync: [
+    { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md" },
+    { from: "memory/{repo}/**", to: "~/.claude/projects/-codebase-{repo}/memory/**", flow: "both" },
+    { source: "overlay", from: "{repo}/**", to: "/codebase/{repo}/**", flow: "both" },
+    { source: "local", from: "skills/**", to: "~/.claude/skills/**" },
+    { source: "local", from: "notes.md", to: "~/notes.md", flow: "both" },
+  ],
+};
+writeFileSync(join(src, "panem.json"), JSON.stringify(panem));
 sh(root, `git init -q --bare -b main ${origin}`);
 sh(
   src,
@@ -52,14 +91,16 @@ const dp = new DevPodBackend({ bin: process.env.DEVPOD ?? "devpod" });
 const repo = new WorkspaceRepo(join(root, "clone"), origin, "main");
 const workspaceSha = await repo.sync();
 const id = `it-${Date.now().toString(36)}`;
-const meta: PodMeta = {
+let meta: PodMeta = {
   id,
   template: "it",
   machine: "m-local",
   repos: [{ name: "hello", url: "https://github.com/octocat/Hello-World.git", ref: "master" }],
   workspaceSha,
   createdAt: new Date().toISOString(),
+  sync: resolveSync(panem, { name: "it" }),
 };
+const sources = new Sources({ dataDir: join(root, "data"), workspace: repo });
 const RELAY_SECRET = "integration-relay-secret-0123";
 const cfg = Config.parse({
   workspaceRepoUrl: origin,
@@ -106,7 +147,15 @@ try {
   const listed = (await dp.list()).find((p) => p.id === id);
   assert(listed?.status === "running", `running after up (got ${listed?.status})`);
 
-  step("context injected");
+  step("upload over devpod ssh");
+  const blob = crypto.getRandomValues(new Uint8Array(300_000));
+  const want = new Bun.CryptoHasher("sha256").update(blob).digest("hex");
+  const up = await dp.upload(id, blob, "sha256sum | cut -d' ' -f1");
+  assert(up.exitCode === 0, `upload ran (${up.stderr})`);
+  assert(new TextDecoder().decode(up.stdout).trim() === want, "uploaded bytes intact");
+  console.log(
+    `devpod ssh stdin passthrough: ${(dp as unknown as { stdinWorks?: boolean }).stdinWorks ? "yes" : "no (chunked fallback)"}`,
+  );
   if ((await run("test -d /codebase/hello/.git")).code !== 0) {
     // Print what the pod looks like so a CI failure is diagnosable without a debugger.
     for (const cmd of [
@@ -123,10 +172,36 @@ try {
     assert(false, "repo cloned");
   }
   assert((await run("git -C /codebase/hello rev-parse --abbrev-ref HEAD")).out === "master", "ref");
+  // Setup must not have copied context itself: that's the controller's job now.
+  assert((await run("test -e ~/.claude/CLAUDE.md")).code !== 0, "no context before copy-in");
+
+  step("copy-in from three sources, then the start hook");
+  const synced = await syncIn({ backend: dp, sources }, meta);
+  meta = { ...meta, sync: synced.sync, workspaceSha: synced.workspaceSha };
+  console.log(`copied ${synced.files} file(s); notes: ${synced.notes.join(" | ") || "none"}`);
+  await dp.runHook(id, "start");
   assert((await run("cat ~/.claude/CLAUDE.md")).out === "# integration", "CLAUDE.md");
   const memDir = `~/.claude/projects/${claudeProjectDir(repoPath("hello"))}/memory`;
   assert((await run(`cat ${memDir}/MEMORY.md`)).out === "- seeded fact", "memory seeded");
+  assert((await run("cat /codebase/hello/CLAUDE.md")).out === "# hello overlay", "overlay file");
+  assert(
+    !(await run("cat /codebase/hello/README")).out.includes("overlay must not"),
+    "tracked file not overwritten",
+  );
+  assert(
+    synced.notes.some((n) => n.includes("hello/README")),
+    "tracked-file skip reported",
+  );
+  assert(
+    (await run("git -C /codebase/hello status --porcelain")).out === "",
+    "overlay hidden from git",
+  );
+  assert((await run("cat ~/.claude/skills/review/SKILL.md")).out === "review", "folder source");
   assert((await run("jq -r .id ~/.panem/pod.json")).out === id, "pod.json");
+  assert(
+    (await run("jq -r .sync.bases.overlay.commit ~/.panem/pod.json")).out.length === 40,
+    "pod.json records merge bases",
+  );
 
   step("stop / start keeps disk");
   await run(`echo '- learned in pod' >> ${memDir}/MEMORY.md`);
@@ -157,11 +232,24 @@ try {
   const body = await (await fetch(`http://127.0.0.1:${hostPort}/`)).text();
   assert(body.includes("from-pod"), `proxied response (got ${JSON.stringify(body)})`);
 
-  step("export");
-  const r = await exportMemory(dp, repo, meta);
-  assert(r.commit, "export committed");
+  step("export to all three sources");
+  await run(
+    "mkdir -p /codebase/hello/specs && echo 'spec from pod' > /codebase/hello/specs/001.md",
+  );
+  await run("printf 'base\\npod\\n' > ~/notes.md");
+  const r = await exportPod({ backend: dp, sources }, meta);
+  console.log(`exported: ${r.files.join(", ")}`);
   const exported = sh(root, `git --git-dir=${origin} show main:memory/hello/MEMORY.md`);
   assert(exported.includes("- learned in pod") && exported.includes("- seeded fact"), "merged");
+  assert(
+    sh(root, `git --git-dir=${overlayOrigin} show main:hello/specs/001.md`).trim() ===
+      "spec from pod",
+    "overlay repo got the new spec",
+  );
+  assert(
+    sh(root, `cat ${join(folder, "notes.md")}`).includes("pod"),
+    "folder source got the notes",
+  );
 
   step("delete");
   await dp.delete(id);
