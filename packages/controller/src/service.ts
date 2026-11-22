@@ -27,6 +27,7 @@ import { z } from "zod";
 import { exportPod } from "./exporter";
 import type { Forwarders, MachineRef } from "./forwarders";
 import type { WorkspaceRepo } from "./git";
+import { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";
 import type { HostProbe } from "./probe";
 import type { Sources } from "./sources";
 import type { JobStore, PodStore } from "./stores";
@@ -59,6 +60,8 @@ export interface ServiceDeps {
   relaySecret?: string;
   forwarders?: Forwarders;
   sources: Sources;
+  /** Time limit for each before-destroy hook, in seconds (default 600). */
+  hookTimeoutSec?: number;
   log?: (msg: string) => void;
 }
 
@@ -454,6 +457,7 @@ export class PodService {
         .map(Number)
         .sort((a, b) => a - b),
       sync,
+      hooks: template.hooks,
     });
     await this.d.pods.put(meta);
     this.setOp(meta.id, { state: "creating" });
@@ -494,6 +498,27 @@ export class PodService {
         },
       );
     return this.get(meta.id);
+  }
+
+  /**
+   * Agents' before-destroy.sh, then the template's beforeDestroy command, in the pod. They push
+   * whatever else should outlive it (e.g. overlay work) straight to its repo. A failure stops
+   * the delete and keeps the pod (Retry, or Delete without saving).
+   */
+  private async runBeforeDestroy(meta: PodMeta): Promise<void> {
+    const r = await this.d.backend.exec(
+      meta.id,
+      bashCommand(BEFORE_DESTROY_SCRIPT, "panem-before-destroy", [
+        this.d.hookTimeoutSec ?? 600,
+        meta.hooks?.beforeDestroy ?? "",
+      ]),
+    );
+    if (r.exitCode !== 0) {
+      const lines = r.stderr.trim().split("\n").filter(Boolean);
+      const reason = lines.at(-1)?.replace(/^panem: /, "") ?? "before-destroy hook failed";
+      const output = lines.slice(-6, -1).join(" | ");
+      throw new Error(output ? `${reason}: ${output}` : reason);
+    }
   }
 
   /** Which agents the pod has and how to reach them (~/.panem/agents.json, from the base). */
@@ -666,6 +691,7 @@ export class PodService {
           await this.d.backend.start(meta.id);
         }
         this.setOp(meta.id, { state: "exporting" });
+        await this.runBeforeDestroy(meta);
         const r = await exportPod({ backend: this.d.backend, repo: this.d.repo }, meta);
         for (const n of r.notes) this.log(`${meta.id}: ${n}`);
         this.log(

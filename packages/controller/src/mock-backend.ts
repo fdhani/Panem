@@ -70,6 +70,18 @@ export class MockBackend implements PodBackend {
     return join(this.pod(id).dir, "codebase");
   }
 
+  /** Stands in for /usr/local/share/panem/agents (agent hooks live here). */
+  agentsDir(id: string): string {
+    return join(this.pod(id).dir, "agents");
+  }
+
+  /** Test helper: install an agent hook in the pod. */
+  writeAgentHook(id: string, agent: string, hook: string, script: string) {
+    const dir = join(this.agentsDir(id), agent);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, hook), script, { mode: 0o755 });
+  }
+
   async up(o: UpOptions) {
     await this.step("up");
     if (!this.machinesList.some((m) => m.name === o.machine)) {
@@ -86,6 +98,7 @@ export class MockBackend implements PodBackend {
       Bun.spawnSync(["git", "init", "-q", repo]);
     }
     mkdirSync(join(this.home(o.id), ".panem"), { recursive: true });
+    mkdirSync(this.agentsDir(o.id), { recursive: true });
     writeFileSync(join(this.home(o.id), ".panem/pod.json"), o.env.PANEM_POD ?? "{}");
     if (this.agentsJson !== undefined) {
       writeFileSync(join(this.home(o.id), ".panem/agents.json"), this.agentsJson);
@@ -125,6 +138,7 @@ export class MockBackend implements PodBackend {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         HOME: this.home(id),
         PANEM_CODE_ROOT: this.codeRoot(id),
+        PANEM_AGENTS_DIR: this.agentsDir(id),
       },
       stdin: stdin ?? "ignore",
       stdout: "pipe",
@@ -140,6 +154,8 @@ export class MockBackend implements PodBackend {
 
   async exec(id: string, command: string): Promise<ExecResult> {
     await this.step("exec");
+    if (command.includes("panem-before-destroy")) this.events.push(`before-destroy:${id}`);
+    if (command.includes("panem-export")) this.events.push(`save-memory:${id}`);
     return this.run(id, command);
   }
 

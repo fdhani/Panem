@@ -10,3 +10,4 @@ export { Sources, listFiles } from "./sources";
 export { ForwarderManager, type Forwarders } from "./forwarders";
 export { SshShell, type MachineShell } from "./shell";
 export { MockForwarders } from "./mock-backend";
+export { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";

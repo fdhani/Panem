@@ -10,10 +10,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
 import {
+  BEFORE_DESTROY_SCRIPT,
   ForwarderManager,
   Sources,
   SshShell,
   WorkspaceRepo,
+  bashCommand,
   exportPod,
   syncIn,
 } from "@panem/controller";
@@ -250,10 +252,21 @@ try {
     "mkdir -p /codebase/hello/specs && echo 'spec from pod' > /codebase/hello/specs/001.md",
   );
   await run("printf 'base\\npod\\n' > ~/notes.md");
+  // The template's before-destroy hook runs first (in the pod, from /codebase); it appends to
+  // memory, so seeing its line in the workspace repo proves it ran before the save.
+  const hook = await dp.exec(
+    id,
+    bashCommand(BEFORE_DESTROY_SCRIPT, "panem-before-destroy", [
+      120,
+      `echo "- hook ran in $PWD" >> ${memDir}/MEMORY.md`,
+    ]),
+  );
+  assert(hook.exitCode === 0, `before-destroy hook ran (${hook.stderr})`);
   const r = await exportPod({ backend: dp, repo }, meta);
   console.log(`saved: ${r.files.join(", ")}`);
   const exported = sh(root, `git --git-dir=${origin} show main:memory/hello/MEMORY.md`);
   assert(exported.includes("- learned in pod") && exported.includes("- seeded fact"), "merged");
+  assert(exported.includes("- hook ran in /codebase"), "hook ran before the save, from /codebase");
   assert(
     Bun.spawnSync([
       "git",

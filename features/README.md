@@ -59,6 +59,7 @@ An agent Feature installs a folder `/usr/local/share/panem/agents/<id>/` contain
 | `agent.json` | yes | `{ "id": "<id>", "label": "Name", "connect": [{ "label": "Open in …", "url": "https://…" }] }`. The pod card shows one button per `connect` entry. |
 | `setup.sh` | no | Runs once after the repos are cloned, e.g. trust settings. Failing fails pod setup. |
 | `start.sh` | no | Runs on every start, e.g. a remote-access session in tmux. Failing is logged. |
+| `before-destroy.sh` | no | Runs before the pod is deleted (from `/codebase`), before the template's own hook and before agent memory is saved, e.g. to push the agent's state somewhere. Failing keeps the pod. The controller runs it, so it works with any version of the base. |
 
 Hooks run as the pod user. They can `. "$(dirname "$0")/../../lib.sh"` for the base's helpers:
 - `pod_json`, `primary_repo_dir`, `log`;

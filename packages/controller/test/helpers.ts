@@ -78,6 +78,7 @@ export async function makeController(opts: {
   forwarders?: Forwarders;
   relaySecret?: string;
   agentEnv?: Record<string, string>;
+  hookTimeoutSec?: number;
 }) {
   const backend = new MockBackend();
   await backend.addMachine({ name: "m-vps", host: "vps" });
@@ -102,6 +103,7 @@ export async function makeController(opts: {
     backend,
     probe,
     forwarders: opts.forwarders ?? noForwarders,
+    hookTimeoutSec: opts.hookTimeoutSec,
     log: () => {},
   });
   await ctl.service.refresh();

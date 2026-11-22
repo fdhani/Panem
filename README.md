@@ -168,6 +168,61 @@ If saving fails, the pod stays in `error` with **Retry**. Saving always uses the
 
 Nothing else comes back. Work worth keeping in an overlay (e.g. new specs) is pushed by the pod itself, from a before-destroy hook (see below), or committed to the code repo.
 
+## Before-destroy hooks
+
+Work other than agent memory that should outlive a pod is pushed **by the pod itself**, straight to where it belongs, just before the pod is deleted. Panem never merges it.
+
+- **Template:** `template.json` → `"hooks": { "beforeDestroy": "<command>" }`. It runs in the pod with bash, from `/codebase`, as the pod user.
+- **Agents:** an agent Feature can ship `before-destroy.sh` (see `features/README.md`).
+
+**Order on delete:**
+1. Agent hooks, in name order.
+2. The template's hook.
+3. Agent memory is saved.
+4. The pod is deleted.
+
+**How hooks run:**
+- Each hook gets 10 minutes. Full output goes to `~/.panem/before-destroy.log` in the pod.
+- They run over `devpod ssh`, so the controller's git credentials are forwarded, the same way code repos are cloned at setup.
+- A failing hook keeps the pod and shows its last output lines on the card. **Retry** runs the hooks and the memory save again, so hooks should be idempotent (`git commit` + `git push` naturally is). **Delete without saving** skips them.
+- The hook a pod runs is the one its template had at summon.
+
+**Example: push overlay work (e.g. new spec-kit specs) back to an overlay repo.** Panem records the files it overlaid in `~/.panem/overlays/<repo>.list`.
+
+```json
+"hooks": {
+  "beforeDestroy": "bash ~/push-overlay.sh git@github.com:you/claude-overlay.git api specs"
+}
+```
+
+The script itself can be synced into the pod like any other file, e.g. `{ "source": "overlay", "from": "push-overlay.sh", "to": "~/push-overlay.sh" }`.
+
+```bash
+#!/usr/bin/env bash
+# push-overlay.sh <overlay repo url> <code repo> [folder...]: copy this repo's overlay files,
+# plus new untracked files (not gitignored) in the overlay's folders and the folders given
+# (e.g. specs), back into the overlay repo, then push.
+set -euo pipefail
+url="$1" repo="$2"
+shift 2
+src="/codebase/$repo" list="$HOME/.panem/overlays/$repo.list" work="$(mktemp -d)"
+git clone --quiet "$url" "$work"
+mapfile -t dirs < <({ cut -d/ -f1 "$list"; printf '%s\n' "$@"; } | sort -u)
+mapfile -t files < <({
+  cat "$list"
+  (cd "$src" && git ls-files --others --exclude-standard -- "${dirs[@]}")
+} | sort -u)
+for f in "${files[@]}"; do
+  [ -f "$src/$f" ] || continue
+  mkdir -p "$work/$repo/$(dirname "$f")"
+  cp "$src/$f" "$work/$repo/$f"
+done
+cd "$work"
+git add -A
+git diff --cached --quiet || git commit -qm "overlay: save $repo from $(hostname)"
+git pull --quiet --rebase && git push --quiet
+```
+
 ## Development
 
 ```bash

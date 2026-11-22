@@ -20,6 +20,18 @@ export const EnvName = z
 /** Credentials a template gets when it doesn't list `env`. */
 export const DEFAULT_TEMPLATE_ENV = ["CLAUDE_CODE_OAUTH_TOKEN"];
 
+/** Commands a template runs in its pods at lifecycle points. */
+export const TemplateHooks = z
+  .object({
+    /**
+     * Runs in the pod (bash, from /codebase) before it's deleted, after agents' own hooks and
+     * before agent memory is saved. E.g. push overlay work to its repo. Failing keeps the pod.
+     */
+    beforeDestroy: z.string().min(1).optional(),
+  })
+  .strict();
+export type TemplateHooks = z.infer<typeof TemplateHooks>;
+
 /** An agent installed in a pod (from ~/.panem/agents.json, written by the Panem base). */
 export const AgentInfo = z.object({
   id: z.string(),
@@ -65,6 +77,7 @@ export const Template = z.object({
    * Absent: just the Claude token, as before agents were pluggable.
    */
   env: z.array(EnvName).optional(),
+  hooks: TemplateHooks.optional(),
   /** Added to panem.json's `exclude` for pods of this template. */
   syncExclude: z.array(z.string().min(1)).optional(),
   /** Path inside the workspace repo, relative to its root. Defaults to the template's .devcontainer folder. */
@@ -129,6 +142,8 @@ export const PodMeta = z.object({
    * Export uses this, never the workspace repo's current panem.json. Absent on older pods.
    */
   sync: ResolvedSync.optional(),
+  /** The template's hooks as they were at summon (delete runs these, not today's template). */
+  hooks: TemplateHooks.optional(),
   /** Agents installed in the pod, read after its start hook. Absent on older pods. */
   agents: z.array(AgentInfo).optional(),
 });

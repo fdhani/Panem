@@ -172,7 +172,8 @@ export class DevPodBackend implements PodBackend {
   }
 
   async exec(id: string, command: string): Promise<ExecResult> {
-    const res = await this.run(["ssh", id, "--command", command], 10 * 60_000, false);
+    // Long enough for before-destroy hooks (each has its own, shorter limit in the pod).
+    const res = await this.run(["ssh", id, "--command", command], 30 * 60_000, false);
     return { exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr };
   }
 

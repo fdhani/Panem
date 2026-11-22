@@ -27,6 +27,8 @@ export interface ControllerOptions {
   forwarders?: Forwarders;
   /** Where the config came from, to pick up credential changes without a restart. */
   configPath?: string;
+  /** Time limit per before-destroy hook, in seconds (tests). */
+  hookTimeoutSec?: number;
   log?: (msg: string) => void;
 }
 
@@ -63,6 +65,7 @@ export async function createController(o: ControllerOptions) {
     relaySecret: o.config.relaySecret,
     forwarders,
     sources,
+    hookTimeoutSec: o.hookTimeoutSec,
     log: o.log,
   });
   const app = createApp({ service, templates, apiToken: o.config.apiToken, ui: await loadUi() });
