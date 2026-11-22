@@ -60,12 +60,28 @@ export const PresetRef = z.object({ preset: z.string().min(1) }).strict();
 export const SyncEntry = z.record(z.string(), z.unknown());
 export type SyncEntryInput = SyncRuleInput | { preset: string };
 
+/**
+ * Shell commands the controller runs in the workspace folder, e.g. to keep it backed up
+ * (`git push`) or up to date (`git pull`). A failure is logged and never blocks anything.
+ */
+export const WorkspaceHooks = z
+  .object({
+    /** Before each summon, before templates are read. */
+    beforeSummon: z.string().min(1).optional(),
+    /** After a pod's memory was saved into the folder (only when files changed). */
+    afterMemorySave: z.string().min(1).optional(),
+  })
+  .strict();
+export type WorkspaceHooks = z.infer<typeof WorkspaceHooks>;
+export type WorkspaceHookName = keyof WorkspaceHooks;
+
 /** `panem.json` at the root of the workspace folder. */
 export const PanemConfig = z
   .object({
     sources: z.record(SourceName, SyncSource).default({}),
     sync: z.array(SyncEntry).optional(),
     exclude: z.array(z.string().min(1)).default([]),
+    hooks: WorkspaceHooks.optional(),
   })
   .strict();
 export type PanemConfig = z.infer<typeof PanemConfig>;

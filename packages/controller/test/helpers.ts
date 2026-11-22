@@ -65,6 +65,7 @@ export async function makeController(opts: {
   relaySecret?: string;
   agentEnv?: Record<string, string>;
   hookTimeoutSec?: number;
+  workspaceHookTimeoutSec?: number;
   /** Keep the config in this file (written here, 0600), as `panem serve` does. */
   configPath?: string;
 }) {
@@ -85,6 +86,8 @@ export async function makeController(opts: {
     agentEnvUpdated: {},
   };
   const dataDir = opts.dataDir ?? mkdtempSync(join(opts.root, "data-"));
+  /** Everything the controller logged. */
+  const logs: string[] = [];
   if (opts.configPath) await saveConfig(config, opts.configPath);
   const ctl = await createController({
     config,
@@ -94,7 +97,8 @@ export async function makeController(opts: {
     probe,
     forwarders: opts.forwarders ?? noForwarders,
     hookTimeoutSec: opts.hookTimeoutSec,
-    log: () => {},
+    workspaceHookTimeoutSec: opts.workspaceHookTimeoutSec,
+    log: (m) => logs.push(m),
   });
   await ctl.service.refresh();
   const req = (method: string, path: string, body?: unknown) =>
@@ -103,7 +107,7 @@ export async function makeController(opts: {
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  return { ...ctl, backend, probe, dataDir, req };
+  return { ...ctl, backend, probe, dataDir, req, logs };
 }
 
 /** Wait until the predicate holds (pods settle asynchronously). */

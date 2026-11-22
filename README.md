@@ -68,8 +68,28 @@ The UI and API listen only on `127.0.0.1` and the host's Tailscale IP (port 7420
 `panem workspace init` makes a folder the workspace: the current one, or the one you name. It adds what's missing (an example template, `panem.json`, `CLAUDE.md`, and empty `memory/`, `skills/` and `plans/` folders) and never touches files already there. Running it in another folder switches the workspace, and the running controller picks that up without a restart. `panem workspace show` prints the current one.
 
 - **It's uploaded to machines.** DevPod copies the whole folder to a machine for every pod. Keep it to templates and context: it can't be `/` or your home folder, it can't hold Panem's config or data, and `init` warns past 50 MB. Never put secrets in it; use `panem env set`.
-- **Keeping history with git (optional):** make the folder a git repo and push it somewhere, to keep history or to edit templates from your laptop (pull on the controller afterwards). Panem only reads and writes files; it never commits, so commit the memory it saves whenever you like.
+- **Backing it up and editing from elsewhere:** the folder lives only on the controller, so back it up. Panem doesn't run git itself, but `panem.json` can give it two commands to run in the folder (see "Workspace hooks" below), for example to pull before each summon and push after each memory save.
 - **Moving from a workspace repo:** configs from before this still point at a git URL, and `panem serve` stops with these steps: `git clone <url> ~/panem-workspace`, then `cd ~/panem-workspace && panem workspace init`. Templates, `panem.json` and `memory/` carry over as they are.
+
+### Workspace hooks
+
+```json
+{
+  "sync": [{ "preset": "claude-code" }],
+  "hooks": {
+    "beforeSummon": "git pull --ff-only -q",
+    "afterMemorySave": "git add -A memory && git commit -qm \"panem: memory from $PANEM_POD_ID\" && git push -q"
+  }
+}
+```
+
+With the folder as a git repo (`git init`, add a remote, push once), templates you push from your laptop are pulled before each summon, and every memory save is committed and pushed. Any command works, e.g. `rclone sync . r2:panem-workspace` instead of git.
+
+- **`beforeSummon`** runs at the start of each summon, before templates are read, so a change you just pushed applies to that summon. It gets `PANEM_TEMPLATE`.
+- **`afterMemorySave`** runs right after a pod's memory was merged into the folder, and only if files changed. It gets `PANEM_POD_ID`, and `PANEM_SAVED_FILES`: the changed paths, one per line.
+- Both run on the controller with bash, in the workspace folder, as the controller's user, one at a time (never alongside a memory save). Each gets 2 minutes. Credentials from `panem env` aren't passed to them.
+- **A failing hook never blocks anything.** A failed pull means the summon uses the folder as it is. A failed push means the memory is still safe in the folder, and the next save pushes it. Failures go to the controller log with their last lines of output.
+- They're read from the folder's current `panem.json` each time. A misspelt hook name shows as a template error.
 
 ## How a pod is built
 

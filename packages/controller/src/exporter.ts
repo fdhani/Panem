@@ -103,7 +103,19 @@ export async function exportPod(
     }));
     if (mapped.length === 0) return { files: [], notes: [] };
     const dir = await d.workspace.dir();
-    return await d.workspace.lock.run(() => apply(dir, d.memoryBase, mapped));
+    return await d.workspace.lock.run(async () => {
+      const r = await apply(dir, d.memoryBase, mapped);
+      if (r.files.length > 0) {
+        // e.g. commit and push the folder: memory is already safe in it, so a failure only
+        // means the backup waits for the next save.
+        const hook = await d.workspace.runHookUnlocked("afterMemorySave", {
+          PANEM_POD_ID: pod.id,
+          PANEM_SAVED_FILES: r.files.join("\n"),
+        });
+        if (hook.error) r.notes.push(hook.error);
+      }
+      return r;
+    });
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }

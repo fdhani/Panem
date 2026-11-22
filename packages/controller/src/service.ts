@@ -435,6 +435,14 @@ export class PodService {
   }
 
   async summon(req: SummonRequest): Promise<Pod> {
+    // e.g. `git pull`, so a change pushed from a laptop applies to this summon. A failure
+    // (say, the remote is unreachable) is logged and the folder is used as it is.
+    if (await this.d.workspace.current()) {
+      const hook = await this.d.workspace
+        .runHook("beforeSummon", { PANEM_TEMPLATE: req.template })
+        .catch((e) => ({ ran: true, ok: false, error: msg(e) }));
+      if (hook.error) this.log(hook.error);
+    }
     const { template, panem } = await this.d.templates.getWithConfig(req.template);
     if (!template) throw new HttpError(404, `template ${req.template} not found`);
     let sync: PodMeta["sync"];

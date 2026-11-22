@@ -24,6 +24,8 @@ export interface ControllerOptions {
   configPath?: string;
   /** Time limit per before-destroy hook, in seconds (tests). */
   hookTimeoutSec?: number;
+  /** Time limit per workspace hook (panem.json "hooks"), in seconds (default 120; tests). */
+  workspaceHookTimeoutSec?: number;
   log?: (msg: string) => void;
 }
 
@@ -39,10 +41,12 @@ export async function createController(o: ControllerOptions) {
       ? new MockForwarders(backend)
       : new ForwarderManager(o.config, new SshShell()));
   // Read fresh, so `panem workspace init` applies without a restart.
-  const workspace = new Workspace(async () =>
-    o.configPath
-      ? (await loadConfig(o.configPath).catch(() => o.config)).workspaceDir
-      : o.config.workspaceDir,
+  const workspace = new Workspace(
+    async () =>
+      o.configPath
+        ? (await loadConfig(o.configPath).catch(() => o.config)).workspaceDir
+        : o.config.workspaceDir,
+    (o.workspaceHookTimeoutSec ?? 120) * 1000,
   );
   const templates = new Templates(workspace);
   const sources = new Sources({ dataDir: dir, workspace });
