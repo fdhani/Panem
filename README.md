@@ -104,6 +104,7 @@ Panem itself is agent-agnostic. Agents are devcontainer Features that a template
 
 **Credentials:**
 - The controller holds them by environment variable name. Set them with `panem env set NAME`: the value is read from stdin or a hidden prompt, never from the command line. `panem env ls` lists names only; `panem env rm NAME` removes one.
+- Or use **Settings → Agent credentials** in the web UI: it lists every credential your templates ask for, marks missing ones, and lets you set, replace or remove them (tap a row), with when each was last updated. Values are write-only there too: the UI and API never show them. The Summon page warns when the chosen template needs one that isn't set.
 - Each template lists the ones its pods get, so a pod never sees credentials it doesn't need:
   ```json
   { "repos": [ ... ], "env": ["CLAUDE_CODE_OAUTH_TOKEN"] }

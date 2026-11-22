@@ -9,7 +9,9 @@ import {
   agentCredentials,
   configPath,
   loadConfig,
+  removeCredential,
   saveConfig,
+  setCredential,
 } from "@panem/core";
 import { defineCommand, runMain } from "citty";
 import { client, table } from "./client";
@@ -116,8 +118,7 @@ const env = defineCommand({
         const name = envName(args.name);
         const value = await readSecret(name);
         if (!value) throw new Error("empty value; nothing saved");
-        const cfg = await loadConfig();
-        await saveConfig({ ...cfg, agentEnv: { ...cfg.agentEnv, [name]: value } });
+        await setCredential(name, value);
         console.log(`saved ${name} (used by templates that list it in "env"; no restart needed)`);
       },
     }),
@@ -134,10 +135,7 @@ const env = defineCommand({
       args: { name: { type: "positional", required: true } },
       async run({ args }) {
         const name = envName(args.name);
-        const cfg = await loadConfig();
-        const { [name]: _, ...rest } = cfg.agentEnv;
-        const legacy = name === "CLAUDE_CODE_OAUTH_TOKEN" ? { claudeOauthToken: undefined } : {};
-        await saveConfig({ ...cfg, ...legacy, agentEnv: rest });
+        await removeCredential(name);
         console.log(`removed ${name}`);
       },
     }),

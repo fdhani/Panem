@@ -1,13 +1,8 @@
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
-import {
-  type Config,
-  type PodBackend,
-  agentCredentials,
-  dataDir as defaultDataDir,
-  loadConfig,
-} from "@panem/core";
+import { type Config, type PodBackend, dataDir as defaultDataDir } from "@panem/core";
 import { createApp } from "./api";
+import { Credentials } from "./credentials";
 import { ForwarderManager, type Forwarders } from "./forwarders";
 import { WorkspaceRepo } from "./git";
 import { MockBackend, MockForwarders } from "./mock-backend";
@@ -50,6 +45,7 @@ export async function createController(o: ControllerOptions) {
   );
   const templates = new Templates(repo);
   const sources = new Sources({ dataDir: dir, workspace: repo });
+  const credentials = new Credentials(o.config, o.configPath);
   const service = new PodService({
     backend,
     repo,
@@ -57,19 +53,23 @@ export async function createController(o: ControllerOptions) {
     probe,
     pods: await PodStore.open(dir),
     jobs: await JobStore.open(dir),
-    // Re-read at each summon, so `panem env set` takes effect without a restart.
-    credentials: async () => {
-      if (!o.configPath) return agentCredentials(o.config);
-      return agentCredentials(await loadConfig(o.configPath).catch(() => o.config));
-    },
+    // Re-read at each summon, so `panem env set` and the web UI take effect without a restart.
+    credentials: () => credentials.all(),
     relaySecret: o.config.relaySecret,
     forwarders,
     sources,
     hookTimeoutSec: o.hookTimeoutSec,
     log: o.log,
   });
-  const app = createApp({ service, templates, apiToken: o.config.apiToken, ui: await loadUi() });
-  return { app, service, backend, repo };
+  const app = createApp({
+    service,
+    templates,
+    credentials,
+    apiToken: o.config.apiToken,
+    ui: await loadUi(),
+    log: o.log,
+  });
+  return { app, service, backend, repo, credentials };
 }
 
 async function seededMock(): Promise<MockBackend> {

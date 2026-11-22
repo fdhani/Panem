@@ -1,18 +1,19 @@
 import type { Template } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Rocket } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { MachineDot } from "../components/status";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { Field, Input, Select } from "../components/ui/field";
-import { keys, queryClient, summon, useMachines, useTemplates } from "../lib/api";
+import { keys, queryClient, summon, useCredentials, useMachines, useTemplates } from "../lib/api";
 import { QueryError } from "./shared";
 
 export function SummonPage() {
   const templates = useTemplates();
   const machines = useMachines();
+  const credentials = useCredentials();
   const navigate = useNavigate();
   const [templateName, setTemplateName] = useState("");
   const [machine, setMachine] = useState("");
@@ -56,6 +57,10 @@ export function SummonPage() {
     ? [...template.repos].sort((a, b) => Number(!!b.primary) - Number(!!a.primary))
     : [];
   const selected = machines.data?.find((m) => m.name === machine);
+  // The controller works out which credentials each template uses (its `env`, or the default).
+  const missing = (credentials.data ?? [])
+    .filter((c) => !c.set && c.usedBy.includes(templateName))
+    .map((c) => c.name);
 
   return (
     <form
@@ -85,6 +90,16 @@ export function SummonPage() {
             ))}
           </Select>
         </Field>
+        {missing.length > 0 && (
+          <p className="rounded-lg bg-warn/10 px-3 py-2 text-sm text-warn">
+            <span className="font-mono break-all">{missing.join(", ")}</span>{" "}
+            {missing.length === 1 ? "isn't" : "aren't"} set, so this pod's agent won't be able to
+            sign in.{" "}
+            <Link to="/settings" className="font-medium underline">
+              Set in Settings
+            </Link>
+          </p>
+        )}
         <Field
           label="Machine"
           htmlFor="machine"
