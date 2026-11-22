@@ -125,12 +125,17 @@ export class DevPodBackend implements PodBackend {
     return { exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr };
   }
 
+  /**
+   * Registers a provider. DevPod only initializes a provider when it's "used", so we let
+   * `provider add` do that (its default). It also becomes DevPod's default provider, which
+   * doesn't matter: every call passes --provider explicitly.
+   */
   async addMachine(m: BackendMachine): Promise<void> {
     if (!m.name.startsWith(MACHINE_PREFIX)) {
       throw new BackendError(`machine names must start with ${MACHINE_PREFIX}`);
     }
     if (m.host === LOCAL_HOST) {
-      await this.run(["provider", "add", "docker", "--name", m.name, "--use=false"]);
+      await this.run(["provider", "add", "docker", "--name", m.name]);
       return;
     }
     const target = m.user ? `${m.user}@${m.host}` : m.host;
@@ -140,7 +145,6 @@ export class DevPodBackend implements PodBackend {
       "ssh",
       "--name",
       m.name,
-      "--use=false",
       "-o",
       `HOST=${target}`,
     ]);

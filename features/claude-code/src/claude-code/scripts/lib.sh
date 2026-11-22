@@ -17,6 +17,7 @@ fi
 
 PANEM_WORKSPACE_ROOT="${PANEM_WORKSPACE_ROOT:-/workspace}"
 PANEM_STATE_DIR="$PANEM_WORKSPACE_ROOT/.panem"
+# shellcheck disable=SC2034 # used by the scripts that source this file
 CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 export PATH="$HOME/.local/bin:$PATH"
 

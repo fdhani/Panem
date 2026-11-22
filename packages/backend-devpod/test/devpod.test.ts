@@ -122,8 +122,8 @@ describe("DevPodBackend", () => {
   test("addMachine registers ssh or docker providers", async () => {
     await dp.addMachine({ name: "m-vps", host: "vps", user: "me" });
     await dp.addMachine({ name: "m-local", host: "local" });
-    expect(calls()[0]).toBe("ARGS provider add ssh --name m-vps --use=false -o HOST=me@vps");
-    expect(calls()[1]).toBe("ARGS provider add docker --name m-local --use=false");
+    expect(calls()[0]).toBe("ARGS provider add ssh --name m-vps -o HOST=me@vps");
+    expect(calls()[1]).toBe("ARGS provider add docker --name m-local");
     await expect(dp.addMachine({ name: "vps", host: "vps" })).rejects.toThrow();
   });
 

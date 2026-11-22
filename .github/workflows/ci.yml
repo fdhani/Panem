@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - run: shellcheck features/claude-code/src/claude-code/install.sh features/claude-code/src/claude-code/scripts/*.sh
+      - run: shellcheck -x -P SCRIPTDIR features/claude-code/src/claude-code/install.sh features/claude-code/src/claude-code/scripts/*.sh
       - run: npm install -g @devcontainers/cli@0.72.0
       - run: devcontainer features test --project-folder features/claude-code --features claude-code --base-image mcr.microsoft.com/devcontainers/base:ubuntu
 
