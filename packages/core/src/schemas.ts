@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { GitRef } from "./refs";
-import { ResolvedSync, SyncRule } from "./sync";
+import { ResolvedSync, SyncEntry } from "./sync";
 
 export { GitRef } from "./refs";
 
@@ -10,6 +10,32 @@ export const Slug = z
   .min(1)
   .max(40)
   .regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, "lowercase letters, digits, and dashes only");
+
+/** An environment variable name for agent credentials. PANEM_* names are Panem's own. */
+export const EnvName = z
+  .string()
+  .regex(/^[A-Z_][A-Z0-9_]*$/, "env names: uppercase letters, digits and _")
+  .refine((n) => !n.startsWith("PANEM_"), "PANEM_* names are reserved");
+
+/** Credentials a template gets when it doesn't list `env`. */
+export const DEFAULT_TEMPLATE_ENV = ["CLAUDE_CODE_OAUTH_TOKEN"];
+
+/** An agent installed in a pod (from ~/.panem/agents.json, written by the Panem base). */
+export const AgentInfo = z.object({
+  id: z.string(),
+  label: z.string().default(""),
+  connect: z.array(z.object({ label: z.string(), url: z.string().url() })).default([]),
+});
+export type AgentInfo = z.infer<typeof AgentInfo>;
+
+/** What pods from before agents were pluggable have: Claude Code with Remote Control. */
+export const LEGACY_AGENTS: AgentInfo[] = [
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    connect: [{ label: "Open in Claude", url: "https://claude.ai/code" }],
+  },
+];
 
 export const TemplateRepo = z.object({
   /** Folder name under /codebase. */
@@ -32,8 +58,13 @@ export const Template = z.object({
   ports: PortNames.optional(),
   /** Ports never exposed (e.g. debuggers, internal agents). */
   ignorePorts: z.array(PortNumber).optional(),
-  /** Replaces panem.json's `sync` rules for pods of this template. */
-  sync: z.array(SyncRule).optional(),
+  /** Replaces panem.json's `sync` (rules and presets) for pods of this template. */
+  sync: z.array(SyncEntry).optional(),
+  /**
+   * Agent credentials (names of the controller's `agentEnv`) this template's pods receive.
+   * Absent: just the Claude token, as before agents were pluggable.
+   */
+  env: z.array(EnvName).optional(),
   /** Added to panem.json's `exclude` for pods of this template. */
   syncExclude: z.array(z.string().min(1)).optional(),
   /** Path inside the workspace repo, relative to its root. Defaults to the template's .devcontainer folder. */
@@ -98,6 +129,8 @@ export const PodMeta = z.object({
    * Export uses this, never the workspace repo's current panem.json. Absent on older pods.
    */
   sync: ResolvedSync.optional(),
+  /** Agents installed in the pod, read after its start hook. Absent on older pods. */
+  agents: z.array(AgentInfo).optional(),
 });
 export type PodMeta = z.infer<typeof PodMeta>;
 
@@ -144,7 +177,10 @@ export const Config = z.object({
   /** Branch of the workspace repo used for templates and memory. */
   workspaceBranch: z.string().default("main"),
   apiToken: z.string().min(16),
+  /** Kept for older configs: same as agentEnv.CLAUDE_CODE_OAUTH_TOKEN. */
   claudeOauthToken: z.string().optional(),
+  /** Agent credentials, by env var name. Each template lists which ones its pods get. */
+  agentEnv: z.record(EnvName, z.string().min(1)).default({}),
   port: z.number().int().default(7420),
   devpodPath: z.string().default("devpod"),
   /** Extra listen addresses; the Tailscale IP is added automatically when found. */

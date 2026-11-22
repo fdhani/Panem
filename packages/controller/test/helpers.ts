@@ -77,6 +77,7 @@ export async function makeController(opts: {
   root: string;
   forwarders?: Forwarders;
   relaySecret?: string;
+  agentEnv?: Record<string, string>;
 }) {
   const backend = new MockBackend();
   await backend.addMachine({ name: "m-vps", host: "vps" });
@@ -92,6 +93,7 @@ export async function makeController(opts: {
     devpodPath: "devpod",
     listen: ["127.0.0.1"],
     relaySecret: opts.relaySecret,
+    agentEnv: opts.agentEnv ?? {},
   };
   const dataDir = opts.dataDir ?? mkdtempSync(join(opts.root, "data-"));
   const ctl = await createController({

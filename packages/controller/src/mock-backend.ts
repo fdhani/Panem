@@ -38,6 +38,14 @@ export class MockBackend implements PodBackend {
   failNext: Partial<Record<Op, string>> = {};
   /** What happened, in order: "up:<id>", "upload:<id>", "hook:start:<id>", ... */
   events: string[] = [];
+  /** What setup writes to ~/.panem/agents.json (undefined: none, like an older Feature). */
+  agentsJson: string | undefined = JSON.stringify([
+    {
+      id: "claude-code",
+      label: "Claude Code",
+      connect: [{ label: "Open in Claude", url: "https://claude.ai/code" }],
+    },
+  ]);
 
   private async step(op: Op) {
     if (this.delayMs) await Bun.sleep(this.delayMs);
@@ -79,6 +87,9 @@ export class MockBackend implements PodBackend {
     }
     mkdirSync(join(this.home(o.id), ".panem"), { recursive: true });
     writeFileSync(join(this.home(o.id), ".panem/pod.json"), o.env.PANEM_POD ?? "{}");
+    if (this.agentsJson !== undefined) {
+      writeFileSync(join(this.home(o.id), ".panem/agents.json"), this.agentsJson);
+    }
     this.events.push(`up:${o.id}`);
   }
 

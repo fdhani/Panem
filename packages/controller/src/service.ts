@@ -1,9 +1,12 @@
 import {
   type AddMachineRequest,
+  AgentInfo,
   type BackendPod,
+  DEFAULT_TEMPLATE_ENV,
   type ForwarderState,
   type ForwarderStatus,
   type Job,
+  LEGACY_AGENTS,
   type Machine,
   type MachineStatus,
   PANEM_VERSION,
@@ -20,6 +23,7 @@ import {
   resolveRefs,
   resolveSync,
 } from "@panem/core";
+import { z } from "zod";
 import { ExportError, exportPod } from "./exporter";
 import type { Forwarders, MachineRef } from "./forwarders";
 import type { WorkspaceRepo } from "./git";
@@ -50,7 +54,8 @@ export interface ServiceDeps {
   pods: PodStore;
   jobs: JobStore;
   probe: HostProbe;
-  claudeOauthToken?: string;
+  /** Agent credentials by env var name, read fresh at each summon (so `panem env set` applies). */
+  credentials?: () => Promise<Record<string, string>> | Record<string, string>;
   relaySecret?: string;
   forwarders?: Forwarders;
   sources: Sources;
@@ -374,7 +379,11 @@ export class PodService {
   private toPod(meta: PodMeta): Pod {
     const op = this.ops.get(meta.id);
     const machineStatus = this.machineStatus(meta.machine);
-    const ports = this.servicesFor(meta);
+    const ports = {
+      ...this.servicesFor(meta),
+      // Pods from before agents were pluggable always had Claude Code.
+      agents: meta.agents ?? LEGACY_AGENTS,
+    };
     if (op) return { ...meta, ...ports, state: op.state, error: op.error, machineStatus };
     const job = this.d.jobs.forPod(meta.id);
     if (job?.status === "failed") {
@@ -450,7 +459,14 @@ export class PodService {
     this.setOp(meta.id, { state: "creating" });
 
     const env: Record<string, string> = { PANEM_POD: JSON.stringify(meta) };
-    if (this.d.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.d.claudeOauthToken;
+    // Only the credentials this template opted in to (default: the Claude token, as before).
+    const creds = (await this.d.credentials?.()) ?? {};
+    const wanted = template.env ?? DEFAULT_TEMPLATE_ENV;
+    for (const name of wanted) {
+      if (creds[name]) env[name] = creds[name];
+      else this.log(`${meta.id}: template ${template.name} wants ${name}, which isn't configured`);
+    }
+    env.PANEM_AGENT_ENV = wanted.join(",");
     if (this.d.relaySecret) env.PANEM_RELAY_SECRET = this.d.relaySecret;
     void this.d.backend
       .up({
@@ -464,6 +480,7 @@ export class PodService {
       // Setup has run; place synced files before the start hook launches the agent.
       .then(() => this.syncIntoPod(meta))
       .then(() => this.d.backend.runHook(meta.id, "start"))
+      .then(() => this.recordAgents(meta.id))
       .then(
         () => {
           this.lastStatus.set(meta.id, "running");
@@ -477,6 +494,19 @@ export class PodService {
         },
       );
     return this.get(meta.id);
+  }
+
+  /** Which agents the pod has and how to reach them (~/.panem/agents.json, from the base). */
+  private async recordAgents(id: string): Promise<void> {
+    const r = await this.d.backend.exec(id, `cat "$HOME/.panem/agents.json"`);
+    if (r.exitCode !== 0) return; // a Feature from before agents were pluggable: see toPod
+    try {
+      const agents = z.array(AgentInfo).parse(JSON.parse(new TextDecoder().decode(r.stdout)));
+      const current = this.d.pods.get(id);
+      if (current) await this.d.pods.put({ ...current, agents });
+    } catch (e) {
+      this.log(`${id}: unreadable agents.json: ${msg(e)}`);
+    }
   }
 
   /** Copy synced files in and record what was sent (the export's merge bases). */

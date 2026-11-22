@@ -1,6 +1,12 @@
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
-import { type Config, type PodBackend, dataDir as defaultDataDir } from "@panem/core";
+import {
+  type Config,
+  type PodBackend,
+  agentCredentials,
+  dataDir as defaultDataDir,
+  loadConfig,
+} from "@panem/core";
 import { createApp } from "./api";
 import { ForwarderManager, type Forwarders } from "./forwarders";
 import { WorkspaceRepo } from "./git";
@@ -19,6 +25,8 @@ export interface ControllerOptions {
   backend?: PodBackend;
   probe?: HostProbe;
   forwarders?: Forwarders;
+  /** Where the config came from, to pick up credential changes without a restart. */
+  configPath?: string;
   log?: (msg: string) => void;
 }
 
@@ -47,7 +55,11 @@ export async function createController(o: ControllerOptions) {
     probe,
     pods: await PodStore.open(dir),
     jobs: await JobStore.open(dir),
-    claudeOauthToken: o.config.claudeOauthToken,
+    // Re-read at each summon, so `panem env set` takes effect without a restart.
+    credentials: async () => {
+      if (!o.configPath) return agentCredentials(o.config);
+      return agentCredentials(await loadConfig(o.configPath).catch(() => o.config));
+    },
     relaySecret: o.config.relaySecret,
     forwarders,
     sources,
@@ -65,8 +77,8 @@ async function seededMock(): Promise<MockBackend> {
   return m;
 }
 
-export async function serve(config: Config) {
-  const { app, service, backend } = await createController({ config });
+export async function serve(config: Config, configPath?: string) {
+  const { app, service, backend } = await createController({ config, configPath });
   if (backend instanceof DevPodBackend) {
     try {
       const v = await backend.version();

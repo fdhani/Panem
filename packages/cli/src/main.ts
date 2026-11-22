@@ -2,7 +2,15 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { Machine, Pod } from "@panem/core";
-import { Config, PANEM_VERSION, configPath, loadConfig, saveConfig } from "@panem/core";
+import {
+  Config,
+  EnvName,
+  PANEM_VERSION,
+  agentCredentials,
+  configPath,
+  loadConfig,
+  saveConfig,
+} from "@panem/core";
 import { defineCommand, runMain } from "citty";
 import { client, table } from "./client";
 
@@ -25,7 +33,7 @@ const serve = defineCommand({
       await saveConfig(cfg);
       console.log("[panem] added port-forwarding secrets to the config");
     }
-    await serve(cfg);
+    await serve(cfg, configPath());
     await new Promise(() => {});
   },
 });
@@ -69,6 +77,70 @@ const init = defineCommand({
       console.log("No Claude token set: pods will need a manual `claude /login`.");
       console.log("Run `claude setup-token`, then `panem init --force --claude-token ...`.");
     }
+  },
+});
+
+/** Read a secret without it ever being a command-line argument: stdin, or a hidden prompt. */
+async function readSecret(name: string): Promise<string> {
+  if (!process.stdin.isTTY) return (await new Response(Bun.stdin.stream()).text()).trim();
+  process.stdout.write(`${name}: `);
+  Bun.spawnSync(["stty", "-echo"], { stdin: "inherit" });
+  try {
+    for await (const line of console) return line.trim();
+    return "";
+  } finally {
+    Bun.spawnSync(["stty", "echo"], { stdin: "inherit" });
+    process.stdout.write("\n");
+  }
+}
+
+const envName = (raw: unknown) => {
+  const r = EnvName.safeParse(String(raw));
+  if (!r.success) throw new Error(`${raw}: ${r.error.issues[0]!.message}`);
+  return r.data;
+};
+
+const env = defineCommand({
+  meta: {
+    name: "env",
+    description: "Agent credentials on this controller (templates choose which ones pods get)",
+  },
+  subCommands: {
+    set: defineCommand({
+      meta: {
+        name: "set",
+        description: "Set a credential; the value is read from stdin or a prompt",
+      },
+      args: { name: { type: "positional", required: true } },
+      async run({ args }) {
+        const name = envName(args.name);
+        const value = await readSecret(name);
+        if (!value) throw new Error("empty value; nothing saved");
+        const cfg = await loadConfig();
+        await saveConfig({ ...cfg, agentEnv: { ...cfg.agentEnv, [name]: value } });
+        console.log(`saved ${name} (used by templates that list it in "env"; no restart needed)`);
+      },
+    }),
+    ls: defineCommand({
+      meta: { name: "ls", description: "List credential names (never values)" },
+      async run() {
+        const cfg = await loadConfig();
+        const names = Object.keys(agentCredentials(cfg)).sort();
+        console.log(names.length ? names.join("\n") : "no credentials set");
+      },
+    }),
+    rm: defineCommand({
+      meta: { name: "rm", description: "Remove a credential" },
+      args: { name: { type: "positional", required: true } },
+      async run({ args }) {
+        const name = envName(args.name);
+        const cfg = await loadConfig();
+        const { [name]: _, ...rest } = cfg.agentEnv;
+        const legacy = name === "CLAUDE_CODE_OAUTH_TOKEN" ? { claudeOauthToken: undefined } : {};
+        await saveConfig({ ...cfg, ...legacy, agentEnv: rest });
+        console.log(`removed ${name}`);
+      },
+    }),
   },
 });
 
@@ -152,12 +224,13 @@ const pod = defineCommand({
         const ps = await (await client()).call<Pod[]>("GET", "/api/pods");
         console.log(
           table([
-            ["ID", "STATE", "MACHINE", "TEMPLATE", "REFS", "PORTS"],
+            ["ID", "STATE", "MACHINE", "TEMPLATE", "AGENTS", "REFS", "PORTS"],
             ...ps.map((p) => [
               p.id,
               p.state,
               `${p.machine}${p.machineStatus === "offline" ? " (offline)" : ""}`,
               p.template,
+              (p.agents ?? []).map((a) => a.id).join(",") || "-",
               p.repos.map((r) => `${r.name}@${r.ref}`).join(" "),
               p.services
                 .map((x) =>
@@ -274,7 +347,7 @@ const rediscover = defineCommand({
 
 export const main = defineCommand({
   meta: { name: "panem", version: VERSION, description: "Agent pods on your own machines" },
-  subCommands: { serve, init, token, machine, pod, rediscover },
+  subCommands: { serve, init, token, env, machine, pod, rediscover },
 });
 
 if (import.meta.main) runMain(main);

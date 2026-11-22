@@ -46,11 +46,17 @@ export const SyncRule = z
 export type SyncRule = z.infer<typeof SyncRule>;
 export type SyncRuleInput = z.input<typeof SyncRule>;
 
+/** `{ "preset": "<agent id>" }` in a sync list stands for that agent's rules. */
+export const PresetRef = z.object({ preset: z.string().min(1) }).strict();
+/** One entry of a `sync` list: a rule or a preset. Checked one by one in resolveSync. */
+export const SyncEntry = z.record(z.string(), z.unknown());
+export type SyncEntryInput = SyncRuleInput | { preset: string };
+
 /** `panem.json` at the root of the workspace repo. */
 export const PanemConfig = z
   .object({
     sources: z.record(SourceName, SyncSource).default({}),
-    sync: z.array(SyncRule).optional(),
+    sync: z.array(SyncEntry).optional(),
     exclude: z.array(z.string().min(1)).default([]),
   })
   .strict();
@@ -72,19 +78,29 @@ export const ResolvedSync = z.object({
 export type ResolvedSync = z.infer<typeof ResolvedSync>;
 export type ResolvedRule = ResolvedSync["rules"][number];
 
-/** Today's behaviour, used when there is no panem.json (or it has no `sync`). */
-export const DEFAULT_RULES: SyncRuleInput[] = [
-  { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md", flow: "in" },
-  ...["skills", "plans", "agents", "commands"].map(
-    (d): SyncRuleInput => ({ from: `${d}/**`, to: `~/.claude/${d}/**`, flow: "in" }),
-  ),
-  {
-    from: "memory/{repo}/**",
-    to: "~/.claude/projects/-codebase-{repo}/memory/**",
-    flow: "both",
-    merge: "union",
-  },
-];
+/**
+ * Sync rules per agent, so `{ "preset": "claude-code" }` can stand in for them. Plain data:
+ * adding an agent (say codex: AGENTS.md -> ~/.codex/AGENTS.md) is one more entry here.
+ */
+export const PRESETS: Record<string, SyncRuleInput[]> = {
+  "claude-code": [
+    { from: "CLAUDE.md", to: "~/.claude/CLAUDE.md", flow: "in" },
+    ...["skills", "plans", "agents", "commands"].map(
+      (d): SyncRuleInput => ({ from: `${d}/**`, to: `~/.claude/${d}/**`, flow: "in" }),
+    ),
+    {
+      from: "memory/{repo}/**",
+      to: "~/.claude/projects/-codebase-{repo}/memory/**",
+      flow: "both",
+      merge: "union",
+    },
+  ],
+};
+
+/** Used when there is no panem.json (or it has no `sync`): Claude Code, as Panem always did. */
+export const DEFAULT_SYNC: SyncEntryInput[] = [{ preset: "claude-code" }];
+/** The default sync, expanded. */
+export const DEFAULT_RULES: SyncRuleInput[] = PRESETS["claude-code"]!;
 
 export class SyncConfigError extends Error {
   constructor(message: string) {
@@ -243,7 +259,7 @@ export function validateRule(
  */
 export function resolveSync(
   panemJson: unknown,
-  template: { name: string; sync?: SyncRuleInput[]; syncExclude?: string[] },
+  template: { name: string; sync?: Record<string, unknown>[]; syncExclude?: string[] },
 ): ResolvedSync {
   const parsed = PanemConfig.safeParse(panemJson ?? {});
   if (!parsed.success) {
@@ -252,17 +268,34 @@ export function resolveSync(
   }
   const cfg = parsed.data;
   const fromTemplate = template.sync !== undefined;
-  const raw = template.sync ?? cfg.sync ?? DEFAULT_RULES;
-  const rules = raw.map((r, i) => {
+  const raw: unknown[] = template.sync ?? cfg.sync ?? DEFAULT_SYNC;
+  const rules: ResolvedRule[] = [];
+  raw.forEach((entry, i) => {
     const where = `${fromTemplate ? `template ${template.name}` : "panem.json"} sync[${i}]`;
-    const p = SyncRule.safeParse(r);
-    if (!p.success) {
-      const issue = p.error.issues[0]!;
-      throw new SyncConfigError(`${where}: ${issue.path.join(".") || "rule"}: ${issue.message}`);
+    const isPreset = typeof entry === "object" && entry !== null && "preset" in entry;
+    let list: { r: unknown; where: string }[] = [{ r: entry, where }];
+    if (isPreset) {
+      const ref = PresetRef.safeParse(entry);
+      if (!ref.success)
+        throw new SyncConfigError(`${where}: a preset entry is just {"preset": "<id>"}`);
+      const preset = PRESETS[ref.data.preset];
+      if (!preset) {
+        throw new SyncConfigError(
+          `${where}: unknown preset "${ref.data.preset}" (known: ${Object.keys(PRESETS).join(", ")})`,
+        );
+      }
+      list = preset.map((r, j) => ({ r, where: `${where} (preset ${ref.data.preset} rule ${j})` }));
     }
-    const rule = { ...p.data, source: p.data.source ?? WORKSPACE_SOURCE };
-    validateRule(rule, cfg.sources, where);
-    return rule;
+    for (const { r, where: w } of list) {
+      const p = SyncRule.safeParse(r);
+      if (!p.success) {
+        const issue = p.error.issues[0]!;
+        throw new SyncConfigError(`${w}: ${issue.path.join(".") || "rule"}: ${issue.message}`);
+      }
+      const rule = { ...p.data, source: p.data.source ?? WORKSPACE_SOURCE };
+      validateRule(rule, cfg.sources, w);
+      rules.push(rule);
+    }
   });
   return {
     sources: cfg.sources,
