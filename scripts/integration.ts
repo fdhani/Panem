@@ -37,7 +37,9 @@ const src = join(root, "ws");
 const tpl = join(src, "templates/it/.devcontainer");
 mkdirSync(tpl, { recursive: true });
 mkdirSync(join(src, "memory/hello"), { recursive: true });
-cpSync(join(import.meta.dir, "../features/claude-code/src/claude-code"), join(tpl, "claude-code"), {
+// Only the agent Feature: it must bring the Panem base along by itself (as existing templates
+// rely on).
+cpSync(join(import.meta.dir, "../features/src/claude-code"), join(tpl, "claude-code"), {
   recursive: true,
 });
 writeFileSync(
@@ -142,6 +144,8 @@ try {
       PANEM_POD: JSON.stringify(meta),
       CLAUDE_CODE_OAUTH_TOKEN: "dummy",
       PANEM_RELAY_SECRET: RELAY_SECRET,
+      // What the controller sends for a template without "env": just the Claude token.
+      PANEM_AGENT_ENV: "CLAUDE_CODE_OAUTH_TOKEN",
     },
   });
   const listed = (await dp.list()).find((p) => p.id === id);
@@ -198,6 +202,15 @@ try {
   );
   assert((await run("cat ~/.claude/skills/review/SKILL.md")).out === "review", "folder source");
   assert((await run("jq -r .id ~/.panem/pod.json")).out === id, "pod.json");
+  assert(
+    (await run("jq -r 'map(.id) | join(\",\")' ~/.panem/agents.json")).out === "claude-code",
+    "agents.json lists the claude-code agent (base installed by the agent Feature)",
+  );
+  assert(
+    (await run("cut -d= -f1 ~/.config/panem/env | sort | tr '\\n' ' '")).out ===
+      "CLAUDE_CODE_OAUTH_TOKEN PANEM_RELAY_SECRET",
+    "only the opted-in credentials were saved",
+  );
   assert(
     (await run("jq -r .sync.bases.overlay.commit ~/.panem/pod.json")).out.length === 40,
     "pod.json records merge bases",

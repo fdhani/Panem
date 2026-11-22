@@ -26,7 +26,7 @@ the pod runs on.
 | | |
 | --- | --- |
 | **Machine** | A Linux or macOS host with Docker, reachable over Tailscale and SSH. It is stored as a DevPod SSH provider named `m-<host>`. |
-| **Template** | `templates/<name>/` in the workspace repo: `template.json` (repos and default refs) plus `.devcontainer/devcontainer.json` (which uses the `claude-code` Feature). |
+| **Template** | `templates/<name>/` in the workspace repo: `template.json` (repos and default refs, and which credentials its pods get) plus `.devcontainer/devcontainer.json` (which lists one or more agent Features, e.g. `claude-code`). |
 | **Pod** | One template running on one machine at chosen refs. It is a DevPod workspace with the id `<template>-<6 chars>`. |
 | **Workspace repo** | Your private git repo. See [`examples/workspace`](examples/workspace) for the layout. |
 
@@ -63,7 +63,7 @@ The UI and API listen only on `127.0.0.1` and the host's Tailscale IP (port 7420
 ## How a pod is built
 
 1. The controller pulls the workspace repo, resolves the pod's sync rules from `panem.json` (see below), and saves them with the pod.
-2. It runs `devpod up <workspace repo>@<branch> --devcontainer-path templates/<t>/... --provider m-<host>`. The pod metadata (`PANEM_POD`), the Claude token and the relay secret are passed through a 0600 env file.
+2. It runs `devpod up <workspace repo>@<branch> --devcontainer-path templates/<t>/... --provider m-<host>`. The pod metadata (`PANEM_POD`), the credentials the template lists and the relay secret are passed through a 0600 env file.
 3. **One-time setup** (the Feature's `post-create.sh`): clones each code repo at its ref into `/codebase/<repo>` (only pushed work is reachable), pre-trusts `/codebase/*`, and keeps Panem's own files (pod.json, logs) in `~/.panem/`.
 4. **Copy-in:** the controller copies the synced files in (CLAUDE.md, skills, memory, overlays, whatever the rules say) and records exactly what it sent.
 5. **Start hook** (`post-start.sh`): starts the port relay and `claude remote-control --name <pod id>` in tmux. It also runs on every later start.
@@ -96,9 +96,27 @@ phone ──tailnet──▶ vps:7601 ──▶ panem-forwarder ──docker net
 - **Repair:** `panem machine repair <name>` (or **Repair** in the UI) redeploys a forwarder. Outdated or unresponsive forwarders are also redeployed automatically.
 - **Who can reach the services:** anyone on your tailnet, without the API token. Use Tailscale ACLs to narrow that if needed.
 
+## Agents
+
+Panem itself is agent-agnostic. Agents are devcontainer Features that a template lists. Claude Code (`claude-code`, reached through Remote Control in the Claude app) is the one that ships today, and a template can list several.
+- **The pod card** shows each agent's connect buttons, read from the pod's `~/.panem/agents.json`.
+- **Writing an agent:** see `features/README.md`.
+
+**Credentials:**
+- The controller holds them by environment variable name. Set them with `panem env set NAME`: the value is read from stdin or a hidden prompt, never from the command line. `panem env ls` lists names only; `panem env rm NAME` removes one.
+- Each template lists the ones its pods get, so a pod never sees credentials it doesn't need:
+  ```json
+  { "repos": [ ... ], "env": ["CLAUDE_CODE_OAUTH_TOKEN"] }
+  ```
+- A template without `env` gets just `CLAUDE_CODE_OAUTH_TOKEN`, as before.
+- `panem init --claude-token` still sets that one.
+- Changes apply to the next summon, with no restart.
+
+**Sync presets:** `{ "preset": "claude-code" }` in a `sync` list stands for Claude Code's files (CLAUDE.md, skills, plans, agents and commands into `~/.claude/`, plus per-repo memory both ways). It's also the default.
+
 ## Synced files (`panem.json`)
 
-What goes into a pod at create time, and what comes back on delete, is set by `panem.json` at the root of the workspace repo. Without it, the defaults apply, which are what Panem always did:
+What goes into a pod at create time, and what comes back on delete, is set by `panem.json` at the root of the workspace repo. Without it, the defaults apply (`[{ "preset": "claude-code" }]`), which are what Panem always did:
 - `CLAUDE.md`, `skills/`, `plans/`, `agents/` and `commands/` are copied into `~/.claude/`.
 - `memory/<repo>/` is copied in to Claude's memory folder for that repo, and merged back on delete.
 
@@ -171,7 +189,8 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 | `packages/forwarder` | Per-machine port forwarder (container image) |
 | `packages/web` | React SPA (TanStack Router and Query, Tailwind) |
 | `packages/cli` | `panem` command (citty); `serve` runs the controller |
-| `features/claude-code` | devcontainer Feature: context injection and Remote Control |
+| `features/src/panem` | devcontainer Feature: the agent-agnostic pod base (repos, relay, agent hooks) |
+| `features/src/claude-code` | devcontainer Feature: the Claude Code agent (Remote Control) |
 
 ## Known gaps and things to verify
 

@@ -38,8 +38,8 @@ export function PodsPage() {
         <Card className="flex flex-col items-center gap-3 px-6 py-10 text-center">
           <p className="font-medium">No pods yet</p>
           <p className="max-w-xs text-sm text-muted">
-            Summon one from a template onto any of your machines. It boots with your repos and
-            Claude context ready.
+            Summon one from a template onto any of your machines. It boots with your repos and your
+            agent's context ready.
           </p>
           <Link to="/summon">
             <Button variant="primary">
@@ -138,7 +138,7 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
           <p className="text-sm">
             {confirm === "delete"
               ? "Export this pod's memory to the workspace repo, then delete it?"
-              : "Force delete without exporting? Memory Claude built in this pod will be lost."}
+              : "Force delete without exporting? Changes made in this pod (agent memory, synced files) will be lost."}
           </p>
           <div className="flex gap-2">
             <Button
@@ -158,11 +158,15 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         <div className="flex flex-wrap items-center gap-2">
           {pod.state === "running" && (
             <>
-              <a href="https://claude.ai/code" target="_blank" rel="noreferrer">
-                <Button variant="primary" size="sm">
-                  <ExternalLink /> Open in Claude
-                </Button>
-              </a>
+              {(pod.agents ?? []).flatMap((a) =>
+                a.connect.map((c) => (
+                  <a key={`${a.id}:${c.url}`} href={c.url} target="_blank" rel="noreferrer">
+                    <Button variant="primary" size="sm" title={a.label || a.id}>
+                      <ExternalLink /> {c.label}
+                    </Button>
+                  </a>
+                )),
+              )}
               <Button
                 size="sm"
                 disabled={offline || action.isPending}
@@ -206,9 +210,10 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
           </div>
         </div>
       )}
-      {pod.state === "running" && (
+      {pod.state === "running" && (pod.agents ?? []).length > 0 && (
         <p className="text-xs text-muted">
-          Remote Control session: <span className="font-mono">{pod.id}</span>
+          {(pod.agents ?? []).map((a) => a.label || a.id).join(", ")} · session{" "}
+          <span className="font-mono">{pod.id}</span>
         </p>
       )}
       {offline && (

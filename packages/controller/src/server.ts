@@ -72,6 +72,8 @@ export async function createController(o: ControllerOptions) {
 async function seededMock(): Promise<MockBackend> {
   const m = new MockBackend();
   m.delayMs = 1500;
+  // Development: PANEM_MOCK_AGENTS='[{"id":"x","label":"X","connect":[...]}]' to try other agents.
+  if (process.env.PANEM_MOCK_AGENTS) m.agentsJson = process.env.PANEM_MOCK_AGENTS;
   await m.addMachine({ name: "m-homeserver", host: "homeserver" });
   await m.addMachine({ name: "m-vps", host: "vps", user: "dev" });
   return m;
