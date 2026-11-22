@@ -58,6 +58,7 @@ test.skipIf(!hasSocat)("end to end through socat relay-conn.sh", async () => {
     await Bun.sleep(50);
     await fwd.tick();
   }
+  await fwd.setExposed("real-aaaaaa", [app.port!]);
   // This host's /proc/net/tcp lists every local listener; find ours.
   const mapped = fwd.state().pods[0]!.ports.find((p) => p.podPort === app.port);
   expect(mapped?.live).toBe(true);

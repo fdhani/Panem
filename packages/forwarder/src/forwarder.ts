@@ -88,11 +88,34 @@ export class Forwarder {
         this.unplaced.push(p.meta.id);
         continue;
       }
-      const declared = Object.keys(p.meta.ports ?? {}).map(Number);
-      p.unmapped = this.o.alloc.assign(p.meta.id, declared, p.live);
+      p.unmapped = this.applyExposure(p.meta.id, p.meta);
     }
     await this.o.alloc.save();
     this.syncListeners();
+  }
+
+  /** Ports switched on for a pod: the controller's choice, else the template's named ports. */
+  private exposedPorts(id: string, meta?: PodMetaLite): number[] {
+    return this.o.alloc.exposedOf(id) ?? Object.keys(meta?.ports ?? {}).map(Number);
+  }
+
+  /** Slots follow exposure: switched-off ports give their slot back. Returns what didn't fit. */
+  private applyExposure(id: string, meta?: PodMetaLite): number[] {
+    const exposed = this.exposedPorts(id, meta);
+    this.o.alloc.retain(id, exposed);
+    return this.o.alloc.assign(id, exposed);
+  }
+
+  /** Set which ports are switched on (from the controller). Allocates a block if needed. */
+  async setExposed(id: string, ports: number[]): Promise<ForwarderPodState | undefined> {
+    if (this.o.alloc.block(id) === undefined) throw new Error("no free port block on this machine");
+    this.o.alloc.setExposed(id, ports);
+    const live = this.pods.get(id);
+    const unmapped = this.applyExposure(id, live?.meta ?? this.metaById.get(id));
+    if (live) live.unmapped = unmapped;
+    await this.o.alloc.save();
+    this.syncListeners();
+    return this.state().pods.find((p) => p.id === id);
   }
 
   /** Prefer an address on a network we share (always true on the default bridge). */
@@ -198,6 +221,7 @@ export class Forwarder {
         const host = new URL(req.url).hostname;
         const pod = this.state().pods.find((p) => p.id === podId);
         const rows = (pod?.ports ?? [])
+          .filter((s) => s.hostPort !== undefined)
           .map((s) => {
             const url = `http://${host.includes(":") ? `[${host}]` : host}:${s.hostPort}`;
             const label = esc(s.name ?? `port ${s.podPort}`);
@@ -220,15 +244,32 @@ export class Forwarder {
       if (start === undefined) continue;
       const live = this.pods.get(id);
       const meta = live?.meta ?? this.metaById.get(id);
+      const slots = new Map(this.o.alloc.slots(id).map((x) => [x.podPort, x]));
+      const exposed = new Set(this.exposedPorts(id, meta));
+      const liveNow = new Set(live?.reachable ? live.live : []);
+      const all = new Set<number>([
+        ...liveNow,
+        ...exposed,
+        ...slots.keys(),
+        ...Object.keys(meta?.ports ?? {}).map(Number),
+      ]);
       pods.push({
         id,
         block: [start, start + this.o.blockSize - 1],
         reachable: live?.reachable ?? false,
-        ports: this.o.alloc.slots(id).map((s) => ({
-          ...s,
-          name: meta?.ports?.[String(s.podPort)],
-          live: live?.reachable === true && live.live.includes(s.podPort),
-        })),
+        ports: [...all]
+          .sort((a, b) => a - b)
+          .map((podPort) => {
+            const s = slots.get(podPort);
+            return {
+              podPort,
+              name: meta?.ports?.[String(podPort)],
+              live: liveNow.has(podPort),
+              exposed: exposed.has(podPort),
+              slot: s?.slot,
+              hostPort: s?.hostPort,
+            };
+          }),
         unmapped: live?.unmapped ?? [],
       });
     }

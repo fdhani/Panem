@@ -161,6 +161,22 @@ export class PodService {
       };
       this.fwd.set(m.name, { status, state, linkHost: await f.linkHost(m) });
       if (status.status === "outdated") void this.autoRepair(m);
+      // Push the user's port switches where the forwarder disagrees (missed update, redeploy).
+      for (const p of state.pods) {
+        const meta = this.d.pods.get(p.id);
+        if (!meta?.exposePorts) continue;
+        const want = this.desiredExposure(meta).join(",");
+        const have = p.ports
+          .filter((x) => x.exposed)
+          .map((x) => x.podPort)
+          .sort((a, b) => a - b)
+          .join(",");
+        if (want !== have) {
+          await f
+            .setExposed(m, p.id, this.desiredExposure(meta))
+            .catch((e) => this.log(`sync exposed ports of ${p.id}: ${msg(e)}`));
+        }
+      }
       // Blocks held for pods that no longer exist (e.g. force-deleted while offline).
       if (this.backendListed) {
         for (const p of state.pods) {
@@ -275,28 +291,85 @@ export class PodService {
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
-  /** Links to the pod's services, from its machine's forwarder state. */
-  private exposedFor(meta: PodMeta): Pick<Pod, "exposed" | "indexUrl"> {
+  /** Ports switched on: the user's choice, else the template's named ports. */
+  private desiredExposure(meta: PodMeta): number[] {
+    return [...(meta.exposePorts ?? Object.keys(meta.ports ?? {}).map(Number))].sort(
+      (a, b) => a - b,
+    );
+  }
+
+  /** The pod's ports with their switch and link, from its machine's forwarder state. */
+  private servicesFor(meta: PodMeta): Pick<Pod, "services" | "indexUrl"> {
     const info = this.fwd.get(meta.machine);
     const p = info?.state?.pods.find((x) => x.id === meta.id);
-    if (!p || !info?.linkHost) return { exposed: [] };
-    const host = info.linkHost;
-    return {
-      indexUrl: `http://${host}:${p.block[0]}`,
-      exposed: p.ports.map((x) => ({
+    const want = new Set(this.desiredExposure(meta));
+    const host = info?.linkHost;
+    const byPort = new Map((p?.ports ?? []).map((x) => [x.podPort, x]));
+    // Ports the forwarder hasn't reported yet (pod still starting) still show their switch.
+    for (const port of [...want, ...Object.keys(meta.ports ?? {}).map(Number)]) {
+      if (!byPort.has(port)) {
+        byPort.set(port, {
+          podPort: port,
+          name: meta.ports?.[String(port)],
+          live: false,
+          exposed: false,
+        });
+      }
+    }
+    const services = [...byPort.values()]
+      .sort((a, b) => a.podPort - b.podPort)
+      .map((x) => ({
         podPort: x.podPort,
-        hostPort: x.hostPort,
-        name: x.name,
+        name: x.name ?? meta.ports?.[String(x.podPort)],
         live: x.live,
-        url: `http://${host}:${x.hostPort}`,
-      })),
+        // The switch shows the user's choice; a link appears once the forwarder published it.
+        exposed: want.has(x.podPort),
+        hostPort: want.has(x.podPort) ? x.hostPort : undefined,
+        url:
+          want.has(x.podPort) && x.hostPort !== undefined && host
+            ? `http://${host}:${x.hostPort}`
+            : undefined,
+      }));
+    return {
+      services,
+      indexUrl: p && host && want.size ? `http://${host}:${p.block[0]}` : undefined,
     };
+  }
+
+  /** Switch one pod port on or off. Stored with the pod, then pushed to its forwarder. */
+  async setPortExposure(id: string, port: number, exposed: boolean): Promise<Pod> {
+    const meta = this.d.pods.get(id);
+    if (!meta) throw new HttpError(404, `pod ${id} not found`);
+    const f = this.d.forwarders;
+    if (!f?.enabled) {
+      throw new HttpError(409, "port forwarding is not configured (run `panem init --force`)");
+    }
+    const current = new Set(this.desiredExposure(meta));
+    if (exposed) current.add(port);
+    else current.delete(port);
+    const next = { ...meta, exposePorts: [...current].sort((a, b) => a - b) };
+    await this.d.pods.put(next);
+    this.publishPods();
+    const machine = this.machineCache.find((m) => m.name === meta.machine);
+    if (machine && machine.status !== "offline") {
+      try {
+        await f.setExposed(machine, id, next.exposePorts);
+        await this.pollForwarder(machine);
+      } catch (e) {
+        // Saved anyway: the next poll retries. Tell the caller it isn't live yet.
+        this.log(`expose ${id}:${port} on ${machine.name}: ${msg(e)}`);
+        throw new HttpError(502, `saved, but the forwarder didn't accept it yet: ${msg(e)}`);
+      } finally {
+        this.publishPods();
+      }
+    }
+    return this.get(id);
   }
 
   private toPod(meta: PodMeta): Pod {
     const op = this.ops.get(meta.id);
     const machineStatus = this.machineStatus(meta.machine);
-    const ports = this.exposedFor(meta);
+    const ports = this.servicesFor(meta);
     if (op) return { ...meta, ...ports, state: op.state, error: op.error, machineStatus };
     const job = this.d.jobs.forPod(meta.id);
     if (job?.status === "failed") {
@@ -357,6 +430,9 @@ export class PodService {
       createdAt: new Date().toISOString(),
       ports: template.ports,
       ignorePorts: template.ignorePorts,
+      exposePorts: Object.keys(template.ports ?? {})
+        .map(Number)
+        .sort((a, b) => a - b),
     });
     await this.d.pods.put(meta);
     this.setOp(meta.id, { state: "creating" });

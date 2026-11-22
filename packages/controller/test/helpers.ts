@@ -130,5 +130,8 @@ export const noForwarders: Forwarders = {
   },
   ensure: async () => ({ status: "disabled" }),
   release: async () => {},
+  setExposed: async () => {
+    throw new Error("disabled");
+  },
   remove: async () => {},
 };

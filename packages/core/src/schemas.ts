@@ -88,25 +88,32 @@ export const PodMeta = z.object({
   createdAt: z.string(),
   ports: PortNames.optional(),
   ignorePorts: z.array(PortNumber).optional(),
+  /**
+   * Ports switched on (published on the machine). Starts as the template's named ports;
+   * everything else stays closed until switched on.
+   */
+  exposePorts: z.array(PortNumber).optional(),
 });
 export type PodMeta = z.infer<typeof PodMeta>;
 
-/** A pod service exposed on its machine by the forwarder. */
-export const PodPort = z.object({
+/** A port inside a pod, as seen by its machine's forwarder. */
+export const PodServicePort = z.object({
   podPort: z.number().int(),
-  hostPort: z.number().int(),
   name: z.string().optional(),
   /** Something is listening on podPort right now. */
   live: z.boolean(),
-  url: z.string(),
+  /** Switched on. hostPort/url are set once the forwarder has published it. */
+  exposed: z.boolean(),
+  hostPort: z.number().int().optional(),
+  url: z.string().optional(),
 });
-export type PodPort = z.infer<typeof PodPort>;
+export type PodServicePort = z.infer<typeof PodServicePort>;
 
 export const Pod = PodMeta.extend({
   state: PodState,
   error: z.string().optional(),
   machineStatus: MachineStatus,
-  exposed: z.array(PodPort).default([]),
+  services: z.array(PodServicePort).default([]),
   /** Slot 0: an index page listing the pod's services. */
   indexUrl: z.string().optional(),
 });
@@ -172,6 +179,9 @@ export const AddMachineRequest = z.object({
 });
 export type AddMachineRequest = z.infer<typeof AddMachineRequest>;
 
+export const SetPortExposure = z.object({ exposed: z.boolean() });
+export type SetPortExposure = z.infer<typeof SetPortExposure>;
+
 export type ServerEvent =
   | { type: "pods"; pods: Pod[] }
   | { type: "machines"; machines: Machine[] }
@@ -185,16 +195,20 @@ export const ForwarderPodState = z.object({
   block: z.tuple([z.number().int(), z.number().int()]),
   /** Running and its relay answers. */
   reachable: z.boolean(),
+  /** Every port the forwarder knows for this pod: listening, named, or switched on. */
   ports: z.array(
     z.object({
-      slot: z.number().int(),
-      hostPort: z.number().int(),
       podPort: z.number().int(),
       name: z.string().optional(),
+      /** Something is listening on it right now. */
       live: z.boolean(),
+      /** Switched on: published on the machine (has a slot and host port). */
+      exposed: z.boolean(),
+      slot: z.number().int().optional(),
+      hostPort: z.number().int().optional(),
     }),
   ),
-  /** Live ports that didn't fit in the block. */
+  /** Exposed ports that didn't fit in the block. */
   unmapped: z.array(z.number().int()).default([]),
 });
 export type ForwarderPodState = z.infer<typeof ForwarderPodState>;

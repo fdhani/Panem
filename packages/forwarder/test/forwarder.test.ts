@@ -14,35 +14,43 @@ afterEach(() => {
 });
 
 describe("Allocator", () => {
-  test("declared ports first, stable slots, persisted, exhaustion, release", async () => {
+  test("stable slots, retain frees, persisted with exposure, exhaustion, release", async () => {
     const path = join(mkdtempSync(join(tmpdir(), "alloc-")), "a.json");
     const a = new Allocator([7600, 7619], 10, path);
     expect(a.block("p1")).toBe(7600);
     expect(a.block("p2")).toBe(7610);
     expect(a.block("p3")).toBeUndefined();
-    expect(a.assign("p1", [8000], [5173, 3000])).toEqual([]);
+    expect(a.assign("p1", [8000, 5173, 3000])).toEqual([]);
     expect(a.slots("p1").map((s) => [s.podPort, s.hostPort])).toEqual([
-      [8000, 7601],
-      [3000, 7602],
-      [5173, 7603],
+      [3000, 7601],
+      [5173, 7602],
+      [8000, 7603],
     ]);
-    // A new port later never moves existing ones.
-    a.assign("p1", [8000], [1234, 5173]);
-    expect(a.slots("p1").find((s) => s.podPort === 1234)?.hostPort).toBe(7604);
+    // Switching one off frees its slot; others don't move; the next one reuses the gap.
+    a.retain("p1", [3000, 8000]);
+    a.assign("p1", [3000, 8000, 1234]);
+    expect(a.slots("p1").map((s) => [s.podPort, s.hostPort])).toEqual([
+      [3000, 7601],
+      [1234, 7602],
+      [8000, 7603],
+    ]);
+    a.setExposed("p1", [8000, 3000, 1234]);
     await a.save();
 
     const b = new Allocator([7600, 7619], 10, path);
     await b.load();
     expect(b.peek("p1")).toBe(7600);
-    expect(b.slots("p1").find((s) => s.podPort === 5173)?.hostPort).toBe(7603);
+    expect(b.exposedOf("p1")).toEqual([1234, 3000, 8000]);
+    expect(b.exposedOf("p2")).toBeUndefined();
+    expect(b.slots("p1").find((s) => s.podPort === 8000)?.hostPort).toBe(7603);
     expect(b.release("p2")).toBe(true);
     expect(b.block("p3")).toBe(7610);
   });
 
-  test("more live ports than slots are reported unmapped", () => {
+  test("more exposed ports than slots are reported unmapped", () => {
     const a = new Allocator([7600, 7603], 4, undefined);
     a.block("p");
-    expect(a.assign("p", [], [1, 2, 3, 4, 5])).toEqual([4, 5]);
+    expect(a.assign("p", [1, 2, 3, 4, 5])).toEqual([4, 5]);
   });
 
   test("parseList", () => {
@@ -105,7 +113,7 @@ function http(body: string) {
 }
 
 describe("Forwarder", () => {
-  test("discovers pods, maps ports, and proxies HTTP and WebSocket", async () => {
+  test("only named ports open by default; switching one on publishes it", async () => {
     const { fwd, base, pod } = await setup();
     const vite = http("vite here");
     const api = http("api here");
@@ -118,19 +126,32 @@ describe("Forwarder", () => {
       },
     );
     await fwd.tick();
-    const st = fwd.state();
-    expect(st.pods).toHaveLength(1);
-    const p = st.pods[0]!;
+    let p = fwd.state().pods[0]!;
     expect(p.block).toEqual([base, base + 4]);
-    // Declared port gets slot 1.
-    expect(p.ports[0]).toMatchObject({ slot: 1, podPort: api.port, name: "api", live: true });
-    expect(p.ports[1]).toMatchObject({ slot: 2, podPort: vite.port, live: true });
-
+    expect(p.ports.find((x) => x.podPort === api.port)).toMatchObject({
+      name: "api",
+      live: true,
+      exposed: true,
+      slot: 1,
+      hostPort: base + 1,
+    });
+    // Found but closed.
+    const closed = p.ports.find((x) => x.podPort === vite.port)!;
+    expect(closed).toMatchObject({ live: true, exposed: false });
+    expect(closed.hostPort).toBeUndefined();
     expect(await (await fetch(`http://127.0.0.1:${base + 1}/`)).text()).toBe("api here");
+    await expect(fetch(`http://127.0.0.1:${base + 2}/`)).rejects.toThrow();
+
+    await fwd.setExposed("shop-aaaaaa", [api.port!, vite.port!]);
+    p = fwd.state().pods[0]!;
+    expect(p.ports.find((x) => x.podPort === vite.port)).toMatchObject({
+      exposed: true,
+      hostPort: base + 2,
+    });
     expect(await (await fetch(`http://127.0.0.1:${base + 2}/`)).text()).toBe("vite here");
     const index = await (await fetch(`http://127.0.0.1:${base}/`)).text();
     expect(index).toContain("shop-aaaaaa");
-    expect(index).toContain(`:${base + 1}`);
+    expect(index).toContain(`:${base + 2}`);
 
     const ws = new WebSocket(`ws://127.0.0.1:${base + 2}/`);
     const reply = await new Promise<string>((resolve, reject) => {
@@ -140,6 +161,12 @@ describe("Forwarder", () => {
     });
     ws.close();
     expect(reply).toBe("echo:hi");
+
+    // Switching off closes the listener and survives the next tick.
+    await fwd.setExposed("shop-aaaaaa", [api.port!]);
+    await fwd.tick();
+    await expect(fetch(`http://127.0.0.1:${base + 2}/`)).rejects.toThrow();
+    expect(fwd.state().pods[0]!.ports.find((x) => x.podPort === vite.port)?.exposed).toBe(false);
   });
 
   test("large bodies survive the pipe intact", async () => {
@@ -153,6 +180,7 @@ describe("Forwarder", () => {
     cleanup.push(() => s.stop(true));
     pod("big-aaaaaa", "127.0.0.2", { [s.port!]: s });
     await fwd.tick();
+    await fwd.setExposed("big-aaaaaa", [s.port!]);
     const res = await fetch(`http://127.0.0.1:${base + 1}/`, { method: "POST", body: big });
     const text = await res.text();
     expect(text.length).toBe(big.length + String(big.length).length + 1);
@@ -171,6 +199,7 @@ describe("Forwarder", () => {
     const s = http("ok");
     pod("p-aaaaaa", "127.0.0.2", { [s.port!]: s });
     await fwd.tick();
+    await fwd.setExposed("p-aaaaaa", [s.port!]);
     expect(fwd.state().pods[0]!.ports[0]!.hostPort).toBe(base + 1);
 
     docker.remove("c-p-aaaaaa");
@@ -217,6 +246,23 @@ describe("Forwarder", () => {
       }),
     );
     expect(((await ok.json()) as { pods: unknown[] }).pods).toHaveLength(1);
+    const auth = { authorization: "Bearer control-token-0123456789" };
+    const bad = await h(
+      new Request("http://x/pods/q-aaaaaa/exposed", {
+        method: "PUT",
+        headers: auth,
+        body: JSON.stringify({ ports: ["x"] }),
+      }),
+    );
+    expect(bad.status).toBe(400);
+    const put = await h(
+      new Request("http://x/pods/q-aaaaaa/exposed", {
+        method: "PUT",
+        headers: auth,
+        body: JSON.stringify({ ports: [s.port] }),
+      }),
+    );
+    expect(((await put.json()) as { ports: { exposed: boolean }[] }).ports[0]!.exposed).toBe(true);
     const del = await h(
       new Request("http://x/pods/q-aaaaaa", {
         method: "DELETE",

@@ -177,7 +177,31 @@ class FakeForwarders implements Forwarders {
     if (st) st.pods = st.pods.filter((p) => p.id !== id);
   }
   async remove() {}
-  podState(machine: string, id: string, ports: [number, number, string?][]) {
+  pushed: [string, string, number[]][] = [];
+  async setExposed(m: { name: string }, id: string, ports: number[]) {
+    this.pushed.push([m.name, id, ports]);
+    const pod = this.states.get(m.name)?.pods.find((p) => p.id === id);
+    if (!pod) return;
+    let slot = 0;
+    const all = new Set([...pod.ports.map((p) => p.podPort), ...ports]);
+    pod.ports = [...all]
+      .sort((a, b) => a - b)
+      .map((podPort) => {
+        const prev = pod.ports.find((p) => p.podPort === podPort);
+        const on = ports.includes(podPort);
+        if (on) slot++;
+        return {
+          podPort,
+          name: prev?.name,
+          live: prev?.live ?? false,
+          exposed: on,
+          slot: on ? slot : undefined,
+          hostPort: on ? 7600 + slot : undefined,
+        };
+      });
+  }
+  /** Forwarder report for a pod: [podPort, hostPort | undefined (closed), name?]. */
+  podState(machine: string, id: string, ports: [number, number | undefined, string?][]) {
     const st = this.states.get(machine) ?? { version: PANEM_VERSION, pods: [], unplaced: [] };
     st.pods.push({
       id,
@@ -185,11 +209,12 @@ class FakeForwarders implements Forwarders {
       reachable: true,
       unmapped: [],
       ports: ports.map(([podPort, hostPort, name], i) => ({
-        slot: i + 1,
         podPort,
-        hostPort,
         name,
         live: true,
+        exposed: hostPort !== undefined,
+        slot: hostPort === undefined ? undefined : i + 1,
+        hostPort,
       })),
     });
     this.states.set(machine, st);
@@ -216,21 +241,63 @@ describe("pod service with forwarders", () => {
     expect(JSON.parse(ctl.backend.pods.get(pod.id)!.env.PANEM_POD!).id).toBe(pod.id);
     expect(ctl.backend.pods.get(pod.id)!.env.PANEM_RELAY_SECRET).toBe("relay-secret-0123456789");
 
+    // The forwarder found two ports; nothing is switched on yet (template names none).
     fwd.podState("m-vps", pod.id, [
-      [5173, 7601, "web"],
-      [8000, 7602],
+      [5173, undefined],
+      [8000, undefined],
     ]);
     await ctl.service.refresh();
-    const p = ctl.service.get(pod.id);
-    expect(p.indexUrl).toBe("http://vps:7600");
-    expect(p.exposed).toEqual([
-      { podPort: 5173, hostPort: 7601, name: "web", live: true, url: "http://vps:7601" },
-      { podPort: 8000, hostPort: 7602, name: undefined, live: true, url: "http://vps:7602" },
+    expect(
+      ctl.service.get(pod.id).services.map((x) => [x.podPort, x.live, x.exposed, x.url]),
+    ).toEqual([
+      [5173, true, false, undefined],
+      [8000, true, false, undefined],
     ]);
+    expect(ctl.service.get(pod.id).indexUrl).toBeUndefined();
+
+    // Switch 5173 on: stored with the pod, pushed to the forwarder, link appears.
+    const on = await ctl.req("PUT", `/api/pods/${pod.id}/ports/5173`, { exposed: true });
+    expect(on.status).toBe(200);
+    expect(fwd.pushed.at(-1)).toEqual(["m-vps", pod.id, [5173]]);
+    const p = ctl.service.get(pod.id);
+    expect(p.exposePorts).toEqual([5173]);
+    expect(p.indexUrl).toBe("http://vps:7600");
+    expect(p.services[0]).toMatchObject({
+      podPort: 5173,
+      live: true,
+      exposed: true,
+      hostPort: 7601,
+      url: "http://vps:7601",
+    });
+    expect(p.services[1]!.exposed).toBe(false);
+
+    // And off again.
+    await ctl.req("PUT", `/api/pods/${pod.id}/ports/5173`, { exposed: false });
+    expect(fwd.pushed.at(-1)).toEqual(["m-vps", pod.id, []]);
+    expect(ctl.service.get(pod.id).services[0]!.url).toBeUndefined();
+    expect((await ctl.req("PUT", `/api/pods/${pod.id}/ports/0`, { exposed: true })).status).toBe(
+      400,
+    );
+    expect((await ctl.req("PUT", "/api/pods/nope/ports/80", { exposed: true })).status).toBe(404);
     expect(ctl.service.machines().find((m) => m.name === "m-vps")?.forwarder).toEqual({
       status: "running",
       version: PANEM_VERSION,
     });
+  });
+
+  test("the forwarder is brought back in line with stored switches on each poll", async () => {
+    const { fwd, ctl } = await setup();
+    const res = await ctl.req("POST", "/api/pods", { template: "shop", machine: "m-vps" });
+    const pod = (await res.json()) as { id: string };
+    await until(() => ctl.service.get(pod.id).state === "running");
+    fwd.podState("m-vps", pod.id, [[3000, undefined]]);
+    await ctl.service.refresh();
+    await ctl.req("PUT", `/api/pods/${pod.id}/ports/3000`, { exposed: true });
+    // e.g. the forwarder was redeployed and lost its state
+    fwd.states.get("m-vps")!.pods[0]!.ports = [{ podPort: 3000, live: true, exposed: false }];
+    fwd.pushed = [];
+    await ctl.service.refresh();
+    expect(fwd.pushed).toEqual([["m-vps", pod.id, [3000]]]);
   });
 
   test("a silent forwarder is marked missing and redeployed", async () => {

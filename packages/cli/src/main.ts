@@ -159,9 +159,12 @@ const pod = defineCommand({
               `${p.machine}${p.machineStatus === "offline" ? " (offline)" : ""}`,
               p.template,
               p.repos.map((r) => `${r.name}@${r.ref}`).join(" "),
-              p.exposed
-                .filter((x) => x.live)
-                .map((x) => `${x.podPort}->${x.url.replace(/^http:\/\//, "")}`)
+              p.services
+                .map((x) =>
+                  x.url
+                    ? `${x.podPort}->${x.url.replace(/^http:\/\//, "")}`
+                    : `${x.podPort}${x.exposed ? "(pending)" : "(off)"}`,
+                )
                 .join(" "),
             ]),
           ]),
@@ -220,6 +223,20 @@ const pod = defineCommand({
         console.log(args.force ? `deleted ${args.id}` : `exporting and deleting ${args.id}`);
       },
     }),
+    expose: defineCommand({
+      meta: { name: "expose", description: "Publish a pod port on its machine" },
+      args: { ...podId, port: { type: "positional", required: true } },
+      async run({ args }) {
+        await setExposure(String(args.id), String(args.port), true);
+      },
+    }),
+    unexpose: defineCommand({
+      meta: { name: "unexpose", description: "Stop publishing a pod port" },
+      args: { ...podId, port: { type: "positional", required: true } },
+      async run({ args }) {
+        await setExposure(String(args.id), String(args.port), false);
+      },
+    }),
     "retry-export": defineCommand({
       meta: { name: "retry-export", description: "Retry a failed export" },
       args: podId,
@@ -230,6 +247,18 @@ const pod = defineCommand({
     }),
   },
 });
+
+async function setExposure(id: string, port: string, exposed: boolean) {
+  const p = await (await client()).call<Pod>("PUT", `/api/pods/${id}/ports/${port}`, { exposed });
+  const svc = p.services.find((x) => String(x.podPort) === port);
+  console.log(
+    exposed
+      ? svc?.url
+        ? `${id}:${port} -> ${svc.url}`
+        : `${id}:${port} switched on (publishing when the pod is running)`
+      : `${id}:${port} switched off`,
+  );
+}
 
 const rediscover = defineCommand({
   meta: { name: "rediscover", description: "Rebuild pod metadata from the pods themselves" },

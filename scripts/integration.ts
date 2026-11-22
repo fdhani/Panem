@@ -146,6 +146,8 @@ try {
     // (socat rewrites backslashes and double quotes in SYSTEM:, hence plain echo.)
     "setsid nohup socat TCP-LISTEN:5173,bind=127.0.0.1,fork,reuseaddr SYSTEM:'sed -n /^.$/q; echo HTTP/1.0 200 OK; echo; echo from-pod' >/dev/null 2>&1 < /dev/null &",
   );
+  // Ports are closed until switched on.
+  await forwarders.setExposed(local, id, [5173]);
   let hostPort: number | undefined;
   for (let i = 0; i < 40 && !hostPort; i++) {
     await Bun.sleep(1000);

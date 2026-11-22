@@ -4,6 +4,8 @@ interface PodAlloc {
   start: number;
   /** pod port -> slot (1..blockSize-1). Slot 0 is the index page. */
   slots: Record<string, number>;
+  /** Ports switched on, as last set by the controller. Unset until it says. */
+  exposed?: number[];
 }
 
 /**
@@ -66,21 +68,20 @@ export class Allocator {
   }
 
   /**
-   * Assign slots: declared ports first (ascending), then other live ports in ascending order.
-   * Existing assignments never move. Returns ports that didn't fit.
+   * Give each of `ports` a slot (ascending), keeping existing assignments where they are.
+   * Returns ports that didn't fit.
    */
-  assign(podId: string, declared: number[], live: number[]): number[] {
+  assign(podId: string, ports: number[]): number[] {
     const a = this.pods[podId];
     if (!a) throw new Error(`no block for ${podId}`);
     const taken = new Set(Object.values(a.slots));
     const unmapped: number[] = [];
-    const wanted = [...new Set([...declared.sort((x, y) => x - y), ...live.sort((x, y) => x - y)])];
-    for (const port of wanted) {
+    for (const port of [...new Set(ports)].sort((x, y) => x - y)) {
       if (a.slots[port] !== undefined) continue;
       let slot = 1;
       while (taken.has(slot)) slot++;
       if (slot >= this.blockSize) {
-        if (live.includes(port)) unmapped.push(port);
+        unmapped.push(port);
         continue;
       }
       a.slots[port] = slot;
@@ -88,6 +89,30 @@ export class Allocator {
       this.dirty = true;
     }
     return unmapped;
+  }
+
+  /** Free the slots of ports not in `ports`. */
+  retain(podId: string, ports: number[]): void {
+    const a = this.pods[podId];
+    if (!a) return;
+    const keep = new Set(ports);
+    for (const p of Object.keys(a.slots)) {
+      if (!keep.has(Number(p))) {
+        delete a.slots[p];
+        this.dirty = true;
+      }
+    }
+  }
+
+  exposedOf(podId: string): number[] | undefined {
+    return this.pods[podId]?.exposed;
+  }
+
+  setExposed(podId: string, ports: number[]): void {
+    const a = this.pods[podId];
+    if (!a) throw new Error(`no block for ${podId}`);
+    a.exposed = [...new Set(ports)].sort((x, y) => x - y);
+    this.dirty = true;
   }
 
   slots(podId: string): { podPort: number; slot: number; hostPort: number }[] {

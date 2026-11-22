@@ -75,11 +75,16 @@ Each machine runs one `panem-forwarder` container, which the controller deploys 
 phone ──tailnet──▶ vps:7601 ──▶ panem-forwarder ──docker network──▶ relay in pod :7699 ──▶ localhost:5173
 ```
 
-- **Blocks:** each pod gets a block of 10 host ports from 7600–7699 on its machine. Slot 0 (e.g. `vps:7600`) is an index page of the pod's services. Slots 1–9 are services, assigned once and kept for the pod's lifetime.
-- **Discovery is automatic:** anything listening inside the pod is picked up within a few seconds, including servers bound to `localhost`, and appears as a link on the pod card. Templates can name ports and reserve their slots, or hide some:
+- **Blocks:** each pod gets a block of 10 host ports from 7600–7699 on its machine. Slot 0 (e.g. `vps:7600`) is an index page of the pod's published services. Slots 1–9 are for ports you switch on.
+- **Off by default:** every port listening in the pod is listed on its card, including servers bound to `localhost`, but each stays closed until you switch it on.
+  - A switched-on port keeps its host port across stop and start, until you switch it off or delete the pod.
+  - The "Expose another port" field switches on a port that isn't listening yet.
+  - From the CLI: `panem pod expose <id> <port>` and `panem pod unexpose <id> <port>`.
+- **Templates:** ports a template names start switched on, and `ignorePorts` hides ports entirely:
   ```json
   { "ports": { "5173": "web", "8000": "api" }, "ignorePorts": [9229] }
   ```
+- **Where the switches live:** in the controller's pod metadata. They're pushed to the forwarder when you flip one, and re-synced on every poll, so a redeployed forwarder comes back with the same ports open.
 - **How it works:**
   1. Inside the pod, a small relay (socat on port 7699, never published) answers the forwarder with the pod's listening ports and pipes connections to them.
   2. The forwarder on each machine polls those relays every 3 seconds.

@@ -24,6 +24,8 @@ export interface Forwarders {
   state(m: MachineRef): Promise<FState>;
   ensure(m: MachineRef): Promise<ForwarderStatus>;
   release(m: MachineRef, podId: string): Promise<void>;
+  /** Set which pod ports are switched on (published on the machine). */
+  setExposed(m: MachineRef, podId: string, ports: number[]): Promise<void>;
   remove(m: MachineRef): Promise<void>;
 }
 
@@ -76,13 +78,33 @@ export class ForwarderManager implements Forwarders {
     return m.host === "local" ? this.address(m) : m.host;
   }
 
-  private async control(m: MachineRef, method: string, path: string): Promise<Response> {
+  private async control(
+    m: MachineRef,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<Response> {
     const ip = await this.address(m);
     return (this.deps.fetch ?? fetch)(`http://${ip}:${this.cfg.forwarder.controlPort}${path}`, {
       method,
-      headers: { authorization: `Bearer ${this.cfg.forwarderToken}` },
+      headers: {
+        authorization: `Bearer ${this.cfg.forwarderToken}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(3000),
     });
+  }
+
+  async setExposed(m: MachineRef, podId: string, ports: number[]): Promise<void> {
+    if (!this.enabled) throw new Error("port forwarding is not configured");
+    const res = await this.control(m, "PUT", `/pods/${encodeURIComponent(podId)}/exposed`, {
+      ports,
+    });
+    if (!res.ok) {
+      const err = ((await res.json().catch(() => ({}))) as { error?: string }).error;
+      throw new Error(`forwarder: ${err ?? res.status}`);
+    }
   }
 
   async state(m: MachineRef): Promise<FState> {
