@@ -1,9 +1,9 @@
 {
   "id": "claude-code",
   "version": "0.3.0",
-  "name": "Claude Code (Panem pod agent)",
-  "description": "Installs Claude Code, clones the pod's repos into /codebase, and keeps a Remote Control session and a port relay running. Synced files (CLAUDE.md, memory, skills, overlays) are copied in by the Panem controller.",
-  "documentationURL": "https://github.com/fdhani/panem/tree/main/features/claude-code",
+  "name": "Claude Code (Panem agent)",
+  "description": "Claude Code as a Panem agent: installs Claude Code, trusts the pod's repos, and keeps a Remote Control session running (open it in the Claude app). Brings the Panem pod base along if the template doesn't list it.",
+  "documentationURL": "https://github.com/fdhani/panem/tree/main/features",
   "options": {
     "installClaude": {
       "type": "boolean",
@@ -28,6 +28,7 @@
   "postCreateCommand": "/usr/local/share/panem/post-create.sh",
   "postStartCommand": "/usr/local/share/panem/post-start.sh",
   "installsAfter": [
+    "ghcr.io/fdhani/panem/panem",
     "ghcr.io/devcontainers/features/common-utils",
     "ghcr.io/devcontainers/features/git"
   ]

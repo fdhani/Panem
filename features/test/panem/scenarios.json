@@ -1,0 +1,13 @@
+{
+  "base-only": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+    "features": { "panem": {} }
+  },
+  "base-and-claude": {
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+    "features": {
+      "panem": {},
+      "claude-code": { "installClaude": false }
+    }
+  }
+}

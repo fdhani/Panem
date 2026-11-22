@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Runs as root at image build time.
+# Panem pod base. Runs as root at image build time. Agent Features carry a copy of this
+# (panem-base/) and run it when the base isn't installed yet, so a template can list just an
+# agent Feature.
 set -euo pipefail
 
-INSTALL_CLAUDE="${INSTALLCLAUDE:-true}"
-REMOTE_CONTROL="${REMOTECONTROL:-true}"
-PERMISSION_MODE="${PERMISSIONMODE:-default}"
 REMOTE_USER="${_REMOTE_USER:-root}"
-SHARE=/usr/local/share/panem
+# Overridable for tests only; pods always use the defaults.
+SHARE="${PANEM_INSTALL_SHARE:-/usr/local/share/panem}"
+CODE_ROOT="${PANEM_INSTALL_CODE_ROOT:-/codebase}"
+VERSION="$(cat "$(dirname "$0")/VERSION")"
 
 install_packages() {
   if command -v apt-get >/dev/null; then
@@ -28,26 +30,13 @@ missing=0
 for bin in git tmux jq curl socat; do command -v "$bin" >/dev/null || missing=1; done
 [ "$missing" = 1 ] && install_packages
 
-mkdir -p "$SHARE"
+mkdir -p "$SHARE/agents"
 cp "$(dirname "$0")"/scripts/*.sh "$SHARE/"
 chmod 755 "$SHARE"/*.sh
+printf '%s\n' "$VERSION" >"$SHARE/VERSION"
 
-cat >"$SHARE/feature.env" <<ENV
-PANEM_REMOTE_CONTROL=${REMOTE_CONTROL}
-PANEM_PERMISSION_MODE=${PERMISSION_MODE}
-ENV
-
-mkdir -p /codebase
-chown "$REMOTE_USER" /codebase 2>/dev/null || true
+mkdir -p "$CODE_ROOT"
+chown "$REMOTE_USER" "$CODE_ROOT" 2>/dev/null || true
 # Devcontainer tooling may remap the user's UID to the host's after this build step, which
 # would leave /codebase owned by a stale UID. Sticky + world-writable (like /tmp) avoids that.
-chmod 1777 /codebase
-
-if [ "$INSTALL_CLAUDE" = "true" ]; then
-  # Install for the remote user so updates and ~/.local/bin land in their home.
-  if [ "$REMOTE_USER" = "root" ]; then
-    curl -fsSL https://claude.ai/install.sh | bash
-  else
-    su - "$REMOTE_USER" -c 'curl -fsSL https://claude.ai/install.sh | bash'
-  fi
-fi
+chmod 1777 "$CODE_ROOT"

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const hasSocat = Bun.which("socat") !== null;
-const scripts = join(import.meta.dir, "../src/claude-code/scripts");
+const scripts = join(import.meta.dir, "../src/panem/scripts");
 const SECRET = "relay-secret-123";
 const root = mkdtempSync(join(tmpdir(), "panem-relay-"));
 let relayPort = 0;

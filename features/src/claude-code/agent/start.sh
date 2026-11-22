@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# postStartCommand: runs on every container start, so Remote Control survives stop/start.
+# Claude Code agent: start hook (run by the base's post-start on every container start), so
+# Remote Control survives stop/start.
 set -euo pipefail
-# shellcheck source=lib.sh
-. "$(dirname "$0")/lib.sh"
+# shellcheck source=../../panem/scripts/lib.sh
+. "$(dirname "$0")/../../lib.sh"
+# Options chosen in devcontainer.json (installed by install.sh).
+# shellcheck disable=SC1091
+[ -f "$(dirname "$0")/agent.env" ] && . "$(dirname "$0")/agent.env"
+CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 SESSION=panem-rc
 [ "${PANEM_REMOTE_CONTROL:-true}" = "true" ] || exit 0

@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# Shared helpers for the panem scripts. Sourced, not executed.
+# Shared helpers for the Panem base scripts and for agent hooks. Sourced, not executed.
+# Agent hooks live in <share>/agents/<id>/ and source this as "$(dirname "$0")/../../lib.sh".
 
-# shellcheck disable=SC1091
-[ -f /usr/local/share/panem/feature.env ] && . /usr/local/share/panem/feature.env
+# Where the base scripts are installed (/usr/local/share/panem in a pod).
+PANEM_SHARE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PANEM_AGENTS_DIR="${PANEM_AGENTS_DIR:-$PANEM_SHARE/agents}"
 
-if [ -f "$HOME/.config/panem/env" ]; then
-  _tok="${CLAUDE_CODE_OAUTH_TOKEN:-}" _sec="${PANEM_RELAY_SECRET:-}"
-  # shellcheck disable=SC1091
-  . "$HOME/.config/panem/env"
-  # Values from the live environment win over the saved ones.
-  CLAUDE_CODE_OAUTH_TOKEN="${_tok:-${CLAUDE_CODE_OAUTH_TOKEN:-}}"
-  PANEM_RELAY_SECRET="${_sec:-${PANEM_RELAY_SECRET:-}}"
-  export CLAUDE_CODE_OAUTH_TOKEN PANEM_RELAY_SECRET
-  unset _tok _sec
+# Secrets saved at create time (agent credentials, the relay secret): restore any that the
+# live environment doesn't already set. Backends may not re-inject env on later starts.
+PANEM_SAVED_ENV="$HOME/.config/panem/env"
+if [ -f "$PANEM_SAVED_ENV" ]; then
+  while IFS= read -r _line; do
+    _name="${_line%%=*}"
+    [[ "$_name" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+    if [ -z "${!_name:-}" ]; then
+      # Values were written with printf %q, so eval restores them exactly.
+      eval "export $_line"
+    fi
+  done <"$PANEM_SAVED_ENV"
+  unset _line _name
 fi
 
 # Code repos live here, at the same path on every machine (Claude names its per-project memory
@@ -22,12 +28,9 @@ PANEM_CODE_ROOT="${PANEM_CODE_ROOT:-${PANEM_WORKSPACE_ROOT:-/codebase}}"
 PANEM_STATE_DIR="${PANEM_STATE_DIR:-$HOME/.panem}"
 # Where pods created before the rename kept their state.
 PANEM_LEGACY_STATE_DIR=/workspace/.panem
-# shellcheck disable=SC2034 # used by the scripts that source this file
-CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 export PATH="$HOME/.local/bin:$PATH"
 
 log() { printf '[panem] %s\n' "$*" >&2; }
-
 
 pod_json() {
   if [ -n "${PANEM_POD:-}" ]; then
