@@ -1,8 +1,8 @@
 // End-to-end test against a real DevPod + Docker (run in CI; needs network for images).
 // Exercises: machine add, up with the claude-code Feature, upload over devpod ssh, sync rules
-// copying in from three kinds of source (workspace repo, an overlay git repo, a folder),
-// stop/start, port exposure through the per-machine forwarder, export back to all three
-// sources, delete.
+// copying in from three kinds of source (the workspace folder, an overlay git repo, another
+// folder), stop/start, port exposure through the per-machine forwarder, saving memory back
+// into the workspace folder, delete. DevPod builds the pod from the workspace folder.
 // Needs the forwarder image built locally first (see .github/workflows/ci.yml).
 //   DEVPOD=/path/to/devpod bun scripts/integration.ts
 import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -14,7 +14,7 @@ import {
   ForwarderManager,
   Sources,
   SshShell,
-  WorkspaceRepo,
+  Workspace,
   bashCommand,
   exportPod,
   syncIn,
@@ -33,8 +33,7 @@ function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`assertion failed: ${msg}`);
 }
 
-// ---- fixture workspace repo ----
-const origin = join(root, "origin.git");
+// ---- fixture workspace folder ----
 const src = join(root, "ws");
 const tpl = join(src, "templates/it/.devcontainer");
 mkdirSync(tpl, { recursive: true });
@@ -54,7 +53,6 @@ writeFileSync(
 );
 writeFileSync(join(src, "CLAUDE.md"), "# integration\n");
 writeFileSync(join(src, "memory/hello/MEMORY.md"), "- seeded fact\n");
-writeFileSync(join(src, ".gitattributes"), "memory/** merge=union\n");
 
 // An overlay repo for the code repo "hello" (Hello-World tracks README, so that one must be
 // skipped), and a folder source on the "controller".
@@ -85,29 +83,23 @@ const panem = {
   ],
 };
 writeFileSync(join(src, "panem.json"), JSON.stringify(panem));
-sh(root, `git init -q --bare -b main ${origin}`);
-sh(
-  src,
-  `git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm seed && git push -q ${origin} main`,
-);
 
 const dp = new DevPodBackend({ bin: process.env.DEVPOD ?? "devpod" });
-const repo = new WorkspaceRepo(join(root, "clone"), origin, "main");
-const workspaceSha = await repo.sync();
+const workspace = new Workspace(() => src);
+const memoryBase = join(root, "data/pods/memory-base");
 const id = `it-${Date.now().toString(36)}`;
-let meta: PodMeta = {
+const meta: PodMeta = {
   id,
   template: "it",
   machine: "m-local",
   repos: [{ name: "hello", url: "https://github.com/octocat/Hello-World.git", ref: "master" }],
-  workspaceSha,
   createdAt: new Date().toISOString(),
   sync: resolveSync(panem, { name: "it" }),
 };
-const sources = new Sources({ dataDir: join(root, "data"), workspace: repo });
+const sources = new Sources({ dataDir: join(root, "data"), workspace });
 const RELAY_SECRET = "integration-relay-secret-0123";
 const cfg = Config.parse({
-  workspaceRepoUrl: origin,
+  workspaceDir: src,
   apiToken: "integration-api-token-0123",
   relaySecret: RELAY_SECRET,
   forwarderToken: "integration-forwarder-0123",
@@ -139,8 +131,8 @@ try {
   await dp.up({
     id,
     machine: "m-local",
+    // The workspace folder: DevPod uploads it to the machine.
     source: src,
-    sourceRef: "main",
     devcontainerPath: "templates/it/.devcontainer/devcontainer.json",
     env: {
       PANEM_POD: JSON.stringify(meta),
@@ -182,8 +174,7 @@ try {
   assert((await run("test -e ~/.claude/CLAUDE.md")).code !== 0, "no context before copy-in");
 
   step("copy-in from three sources, then the start hook");
-  const synced = await syncIn({ backend: dp, sources }, meta);
-  meta = { ...meta, workspaceSha: synced.workspaceSha };
+  const synced = await syncIn({ backend: dp, sources, memoryBase }, meta);
   console.log(`copied ${synced.files} file(s); notes: ${synced.notes.join(" | ") || "none"}`);
   await dp.runHook(id, "start");
   assert((await run("cat ~/.claude/CLAUDE.md")).out === "# integration", "CLAUDE.md");
@@ -214,8 +205,8 @@ try {
     "only the opted-in credentials were saved",
   );
   assert(
-    (await run("jq -r .sync.bases.overlay.commit ~/.panem/pod.json")).out.length === 40,
-    "pod.json records merge bases",
+    sh(root, `cat ${join(memoryBase, "memory/hello/MEMORY.md")}`) === "- seeded fact\n",
+    "memory merge base kept on the controller",
   );
 
   step("stop / start keeps disk");
@@ -253,7 +244,7 @@ try {
   );
   await run("printf 'base\\npod\\n' > ~/notes.md");
   // The template's before-destroy hook runs first (in the pod, from /codebase); it appends to
-  // memory, so seeing its line in the workspace repo proves it ran before the save.
+  // memory, so seeing its line in the workspace folder proves it ran before the save.
   const hook = await dp.exec(
     id,
     bashCommand(BEFORE_DESTROY_SCRIPT, "panem-before-destroy", [
@@ -262,10 +253,13 @@ try {
     ]),
   );
   assert(hook.exitCode === 0, `before-destroy hook ran (${hook.stderr})`);
-  const r = await exportPod({ backend: dp, repo }, meta);
+  // Edited in the workspace folder while the pod ran: kept alongside the pod's lines.
+  writeFileSync(join(src, "memory/hello/MEMORY.md"), "- seeded fact\n- edited on the controller\n");
+  const r = await exportPod({ backend: dp, workspace, memoryBase }, meta);
   console.log(`saved: ${r.files.join(", ")}`);
-  const exported = sh(root, `git --git-dir=${origin} show main:memory/hello/MEMORY.md`);
+  const exported = sh(root, `cat ${join(src, "memory/hello/MEMORY.md")}`);
   assert(exported.includes("- learned in pod") && exported.includes("- seeded fact"), "merged");
+  assert(exported.includes("- edited on the controller"), "the folder's own edit kept");
   assert(exported.includes("- hook ran in /codebase"), "hook ran before the save, from /codebase");
   assert(
     Bun.spawnSync([

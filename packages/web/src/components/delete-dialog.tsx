@@ -48,7 +48,7 @@ export function DeleteDialog({
     ];
   } else if (memory) {
     text =
-      "Any before-destroy hooks run first. The agent's memory can be saved to the workspace repo.";
+      "Any before-destroy hooks run first. The agent's memory can be saved to the workspace folder.";
     buttons = [
       { label: "Save memory & delete", choice: "save", variant: "primary" },
       { label: "Delete without saving memory", choice: "nomemory", variant: "danger" },

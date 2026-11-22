@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Pod } from "@panem/core";
 import { makeController, makeRepo, makeWorkspace, sh, until } from "./helpers";
@@ -57,11 +57,11 @@ describe("copy-in", () => {
     expect(
       ctl.backend.readPodFile(pod.id, "~/.claude/projects/-codebase-api/memory/MEMORY.md"),
     ).toContain("uses postgres");
-    // The merge base is the commit that was actually sent, and the pod's pod.json knows it.
-    const head = sh(ws.root, `git --git-dir=${ws.origin} rev-parse main`).trim();
-    expect(pod.workspaceSha).toBe(head);
-    const podJson = JSON.parse(ctl.backend.readPodFile(pod.id, "~/.panem/pod.json")!);
-    expect(podJson.workspaceSha).toBe(head);
+    // The memory sent is kept on the controller as the merge base for saving it back.
+    expect(
+      readFileSync(join(ctl.dataDir, "pods", pod.id, "memory-base/memory/api/MEMORY.md"), "utf8"),
+    ).toContain("uses postgres");
+    expect(JSON.parse(ctl.backend.readPodFile(pod.id, "~/.panem/pod.json")!).id).toBe(pod.id);
   });
 
   test("all three source kinds, with overlays hidden from git", async () => {
@@ -125,7 +125,7 @@ describe("an empty overlay repo is a valid source", () => {
 });
 
 describe("delete saves agent memory, and only that", () => {
-  test("memory goes to the workspace repo; overlay, folder and copied files stay put", async () => {
+  test("memory goes to the workspace folder; overlay, folder and copied files stay put", async () => {
     const { ws, overlay, folder } = setup();
     const ctl = await makeController(ws);
     const pod = await summon(ctl);
@@ -146,7 +146,6 @@ describe("delete saves agent memory, and only that", () => {
     await ctl.service.idle();
     expect(ctl.service.podList()).toEqual([]);
     expect(ws.read("memory/api/MEMORY.md")).toContain("- learned");
-    expect(ws.log().split("\n")[0]).toBe(`panem: save memory from ${pod.id}`);
     expect(ws.read("CLAUDE.md")).toBe("be nice\n");
     expect(overlay.log()).toBe(overlayLog);
     expect(() => overlay.read("api/specs/001/spec.md")).toThrow();
@@ -183,24 +182,49 @@ describe("delete saves agent memory, and only that", () => {
     expect(ws.read("memory/api/MEMORY.md")).toContain("- kept");
   });
 
-  test("a failing push keeps the pod in error; retry finishes it", async () => {
+  test("edits made in the workspace while the pod ran are kept (union merge)", async () => {
     const ws = makeWorkspace();
     const ctl = await makeController(ws);
     const pod = await summon(ctl);
-    ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "- from pod\n");
-    const hook = join(ws.origin, "hooks/pre-receive");
-    writeFileSync(hook, "#!/bin/sh\necho 'read-only today' >&2\nexit 1\n", { mode: 0o755 });
-
+    ws.pushFrom("me", "memory/api/MEMORY.md", "# API memory\n- uses postgres\n- from me\n");
+    ctl.backend.writeMemory(
+      pod.id,
+      "api",
+      "MEMORY.md",
+      "# API memory\n- uses postgres\n- from pod\n",
+    );
     await ctl.req("DELETE", `/api/pods/${pod.id}`);
     await ctl.service.idle();
-    expect(ctl.service.get(pod.id).state).toBe("error");
-    expect(ctl.backend.pods.has(pod.id)).toBe(true);
+    const merged = ws.read("memory/api/MEMORY.md");
+    expect(merged).toContain("- from me");
+    expect(merged).toContain("- from pod");
+    expect(merged).not.toContain("<<<");
+    // The merge base is gone with the pod.
+    expect(existsSync(join(ctl.dataDir, "pods", pod.id))).toBe(false);
+  });
 
-    sh(ws.root, `rm ${hook}`);
-    await ctl.req("POST", `/api/pods/${pod.id}/retry-export`);
+  test("unchanged in the pod leaves the folder's newer copy alone", async () => {
+    const ws = makeWorkspace();
+    const ctl = await makeController(ws);
+    const pod = await summon(ctl);
+    ws.pushFrom("me", "memory/api/MEMORY.md", "rewritten on the controller\n");
+    await ctl.req("DELETE", `/api/pods/${pod.id}`);
     await ctl.service.idle();
-    expect(ctl.service.podList()).toEqual([]);
-    expect(ws.read("memory/api/MEMORY.md")).toContain("- from pod");
+    expect(ws.read("memory/api/MEMORY.md")).toBe("rewritten on the controller\n");
+  });
+
+  test("a pod with no merge base (from before folders) keeps both sides' lines", async () => {
+    const ws = makeWorkspace();
+    const ctl = await makeController(ws);
+    const pod = await summon(ctl);
+    rmSync(join(ctl.dataDir, "pods", pod.id), { recursive: true, force: true });
+    ws.pushFrom("me", "memory/api/MEMORY.md", "# API memory\n- uses postgres\n- from me\n");
+    ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "# API memory\n- uses postgres\n- pod\n");
+    await ctl.req("DELETE", `/api/pods/${pod.id}`);
+    await ctl.service.idle();
+    const merged = ws.read("memory/api/MEMORY.md");
+    expect(merged).toContain("- from me");
+    expect(merged).toContain("- pod");
   });
 
   test("pods from before sync rules export memory with the defaults, incl. -workspace- paths", async () => {

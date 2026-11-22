@@ -91,3 +91,60 @@ describe("credential writes", () => {
     expect(() => setCredential("PANEM_X", "v", path)).toThrow();
   });
 });
+
+describe("upgradeConfig", () => {
+  test("adds missing secrets, moves the old Claude token, and writes only when needed", async () => {
+    const { mkdtempSync, readFileSync, statSync, writeFileSync, existsSync } = await import(
+      "node:fs"
+    );
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { upgradeConfig } = await import("../src");
+    const path = join(mkdtempSync(join(tmpdir(), "panem-up-")), "config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({ workspaceRepoUrl: "x", apiToken: "a".repeat(16), claudeOauthToken: "old" }),
+    );
+    let n = 0;
+    const r = await upgradeConfig(() => `secret-${n++}`.padEnd(16, "x"), path);
+    expect(r.notes).toHaveLength(2);
+    const cfg = JSON.parse(readFileSync(path, "utf8"));
+    expect(cfg.relaySecret).toBe("secret-0".padEnd(16, "x"));
+    expect(cfg.forwarderToken).toBe("secret-1".padEnd(16, "x"));
+    expect(cfg.claudeOauthToken).toBeUndefined();
+    expect(cfg.agentEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe("old");
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(existsSync(`${path}.lock`)).toBe(false);
+
+    // Nothing to do: the file isn't rewritten.
+    const before = statSync(path).mtimeMs;
+    await Bun.sleep(20);
+    const again = await upgradeConfig(() => "never", path);
+    expect(again.notes).toEqual([]);
+    expect(statSync(path).mtimeMs).toBe(before);
+  });
+
+  test("a value already in agentEnv wins over the old setting", async () => {
+    const { mkdtempSync, readFileSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { upgradeConfig } = await import("../src");
+    const path = join(mkdtempSync(join(tmpdir(), "panem-up-")), "config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        workspaceRepoUrl: "x",
+        apiToken: "a".repeat(16),
+        relaySecret: "r".repeat(16),
+        forwarderToken: "f".repeat(16),
+        claudeOauthToken: "old",
+        agentEnv: { CLAUDE_CODE_OAUTH_TOKEN: "new" },
+      }),
+    );
+    await upgradeConfig(() => "x", path);
+    const cfg = JSON.parse(readFileSync(path, "utf8"));
+    expect(cfg.agentEnv.CLAUDE_CODE_OAUTH_TOKEN).toBe("new");
+    expect(cfg.claudeOauthToken).toBeUndefined();
+    expect(cfg.relaySecret).toBe("r".repeat(16));
+  });
+});

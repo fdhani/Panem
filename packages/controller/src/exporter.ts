@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import {
@@ -13,10 +13,10 @@ import {
   mapOut,
   resolveSync,
 } from "@panem/core";
-import { type WorkspaceRepo, git } from "./git";
 import { mergeFile } from "./merge";
 import { EXPORT_SCRIPT, bashCommand } from "./pod/scripts";
 import { listFiles } from "./sources";
+import type { Workspace } from "./workspace";
 
 /** Export limits: memory is small; anything bigger is a mistake worth a clear error. */
 export const EXPORT_MAX_BYTES = 50 * 1024 * 1024;
@@ -55,9 +55,8 @@ function fromLegacy(p: string): string {
 }
 
 export interface ExportResult {
-  /** Memory files changed in the workspace repo, relative to its root. */
+  /** Memory files changed in the workspace folder, relative to it. */
   files: string[];
-  commit?: string;
   /** Files whose pod version wasn't used (binary changed on both sides). */
   notes: string[];
 }
@@ -68,14 +67,15 @@ interface PodFile extends Mapping {
 }
 
 /**
- * Save the pod's agent memory into the workspace repo: union-merge each file against the
- * commit the pod was given, then commit and push (retrying push races). Nothing else is ever
- * written back; work other than memory is pushed by the pod's before-destroy hooks.
+ * Save the pod's agent memory into the workspace folder: each file is union-merged against
+ * the copy the pod was given (kept in `memoryBase` at copy-in), so edits made in the folder
+ * meanwhile are kept. Nothing else is ever written back; work other than memory is pushed by
+ * the pod's before-destroy hooks.
  */
 export async function exportPod(
-  d: { backend: PodBackend; repo: WorkspaceRepo },
+  d: { backend: PodBackend; workspace: Workspace; memoryBase: string },
   pod: PodMeta,
-  opts: { attempts?: number; maxBytes?: number; maxFiles?: number } = {},
+  opts: { maxBytes?: number; maxFiles?: number } = {},
 ): Promise<ExportResult> {
   const sync = syncOf(pod);
   const rules = expandRules(
@@ -102,17 +102,20 @@ export async function exportPod(
       local: byPath.get(m.dest)!,
     }));
     if (mapped.length === 0) return { files: [], notes: [] };
-
-    let lastErr: unknown;
-    for (let i = 0; i < (opts.attempts ?? 3); i++) {
-      try {
-        return await d.repo.lock.run(() => applyAndPush(d.repo, pod, mapped));
-      } catch (e) {
-        lastErr = e;
-        if (!isPushRace(e)) break;
+    const dir = await d.workspace.dir();
+    return await d.workspace.lock.run(async () => {
+      const r = await apply(dir, d.memoryBase, mapped);
+      if (r.files.length > 0) {
+        // e.g. commit and push the folder: memory is already safe in it, so a failure only
+        // means the backup waits for the next save.
+        const hook = await d.workspace.runHookUnlocked("afterMemorySave", {
+          PANEM_POD_ID: pod.id,
+          PANEM_SAVED_FILES: r.files.join("\n"),
+        });
+        if (hook.error) r.notes.push(hook.error);
       }
-    }
-    throw lastErr;
+      return r;
+    });
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
@@ -141,54 +144,37 @@ async function unpack(out: string, dir: string): Promise<{ podPath: string; loca
   return files;
 }
 
-/** Keep writes inside the repo, whatever a path says. */
+/** Keep writes inside the folder, whatever a path says. */
 function inside(root: string, rel: string): string {
   const base = resolve(root);
   const p = resolve(base, rel);
-  if (!p.startsWith(base + sep)) throw new Error(`path escapes the workspace repo: ${rel}`);
+  if (!p.startsWith(base + sep)) throw new Error(`path escapes the workspace: ${rel}`);
   return p;
 }
 
-async function applyAndPush(
-  repo: WorkspaceRepo,
-  pod: PodMeta,
-  files: PodFile[],
-): Promise<ExportResult> {
-  await repo.syncUnlocked();
+async function apply(dir: string, memoryBase: string, files: PodFile[]): Promise<ExportResult> {
   const changed: string[] = [];
   const notes: string[] = [];
   for (const f of files) {
-    const dest = inside(repo.dir, f.src);
-    if (relative(repo.dir, dest).split(sep)[0] === ".git") continue;
+    const dest = inside(dir, f.src);
+    if (relative(dir, dest).split(sep)[0] === ".git") continue;
     const current = existsSync(dest) ? await readBytes(dest) : undefined;
-    const base = await repo.showBytes(pod.workspaceSha, f.src);
+    // Pods from before memory bases were kept have none: union keeps both sides' lines.
+    const basePath = join(memoryBase, f.src);
+    const base = existsSync(basePath) ? await readBytes(basePath) : undefined;
     const out = await mergeFile(current, base, await readBytes(f.local));
     if (out.note) notes.push(`${f.src}: ${out.note}`);
     if (out.content) {
       await mkdir(dirname(dest), { recursive: true });
-      await writeFile(dest, out.content);
+      const tmp = `${dest}.panem-${process.pid}.tmp`;
+      await writeFile(tmp, out.content);
+      await rename(tmp, dest);
       changed.push(f.src);
     }
   }
-  if (changed.length === 0) return { files: [], notes };
-  await git(repo.dir, ["add", "--", ...changed]);
-  await git(repo.dir, [
-    "commit",
-    "--quiet",
-    "-m",
-    `panem: save memory from ${pod.id}`,
-    "-m",
-    `Template: ${pod.template}\nMachine: ${pod.machine}\nRefs: ${pod.repos.map((r) => `${r.name}@${r.ref}`).join(", ")}`,
-  ]);
-  await git(repo.dir, ["push", "--quiet", "origin", `HEAD:${repo.branch}`]);
-  return { files: changed, commit: await repo.headUnlocked(), notes };
+  return { files: changed, notes };
 }
 
 async function readBytes(p: string): Promise<Uint8Array> {
   return new Uint8Array(await readFile(p));
-}
-
-function isPushRace(e: unknown): boolean {
-  const msg = e instanceof Error ? `${e.message}\n${(e as { stderr?: string }).stderr ?? ""}` : "";
-  return /rejected|fetch first|non-fast-forward/i.test(msg);
 }

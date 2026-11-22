@@ -12,11 +12,13 @@ import { z } from "zod";
 import type { Credentials } from "./credentials";
 import { HttpError, type PodService, msg } from "./service";
 import type { Templates } from "./templates";
+import { type Workspace, WorkspaceError } from "./workspace";
 
 export interface ApiDeps {
   service: PodService;
   templates: Templates;
   credentials: Credentials;
+  workspace: Workspace;
   apiToken: string;
   log?: (msg: string) => void;
   /** Static UI assets: path -> Blob. Missing means API-only. */
@@ -64,6 +66,7 @@ export function createApp(d: ApiDeps): Hono {
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.message }, err.status);
     if (err instanceof BackendError) return c.json({ error: err.message }, 502);
+    if (err instanceof WorkspaceError) return c.json({ error: err.message }, 409);
     console.error(err);
     return c.json({ error: msg(err) }, 500);
   });
@@ -95,6 +98,7 @@ export function createApp(d: ApiDeps): Hono {
     c.json(await service.repairMachine(c.req.param("name"))),
   );
 
+  app.get("/api/workspace", async (c) => c.json({ dir: await d.workspace.current() }));
   app.get("/api/templates", async (c) => c.json(await d.templates.list()));
 
   app.get("/api/pods", (c) => c.json(service.podList()));

@@ -64,6 +64,46 @@ export async function updateConfig(
   }
 }
 
+/**
+ * Bring an older config up to date, under the lock, writing only if something changed:
+ * - port forwarding's secrets (configs from before it) are generated;
+ * - the old `claudeOauthToken` setting moves into agentEnv (no updated time: it isn't known).
+ * `secret` makes a new random secret (passed in so core stays free of crypto choices).
+ */
+export async function upgradeConfig(
+  secret: () => string,
+  path = configPath(),
+): Promise<{ cfg: Config; notes: string[] }> {
+  const notes: string[] = [];
+  const needs = (c: Config) =>
+    !c.relaySecret || !c.forwarderToken || c.claudeOauthToken !== undefined;
+  if (!needs(await loadConfig(path))) return { cfg: await loadConfig(path), notes };
+  const cfg = await updateConfig((c) => {
+    let next = c;
+    if (!c.relaySecret || !c.forwarderToken) {
+      next = {
+        ...next,
+        relaySecret: c.relaySecret ?? secret(),
+        forwarderToken: c.forwarderToken ?? secret(),
+      };
+      notes.push("added port-forwarding secrets to the config");
+    }
+    if (c.claudeOauthToken !== undefined) {
+      const { claudeOauthToken, ...rest } = next;
+      next = {
+        ...rest,
+        agentEnv: {
+          ...(claudeOauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: claudeOauthToken } : {}),
+          ...next.agentEnv, // a value already in agentEnv wins, as it does when reading
+        },
+      };
+      notes.push("moved claudeOauthToken into agentEnv (CLAUDE_CODE_OAUTH_TOKEN)");
+    }
+    return next;
+  }, path);
+  return { cfg, notes };
+}
+
 /** Set an agent credential (by env var name) in the config. */
 export function setCredential(name: string, value: string, path = configPath()) {
   const n = EnvName.parse(name);

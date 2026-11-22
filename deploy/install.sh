@@ -23,9 +23,10 @@ fi
 if [ ! -f "${PANEM_CONFIG:-$HOME/.config/panem/config.json}" ]; then
   cat <<MSG
 Installed. Next:
-  1. claude setup-token                      # long-lived token for pods
-  2. panem init --workspace-repo git@github.com:you/workspace.git --claude-token <token>
-  3. systemctl --user enable --now panem
+  1. panem init                              # this controller: API token and secrets
+  2. mkdir ~/panem-workspace && cd ~/panem-workspace && panem workspace init
+  3. claude setup-token, then: panem env set CLAUDE_CODE_OAUTH_TOKEN
+  4. systemctl --user enable --now panem
 MSG
   exit 0
 fi

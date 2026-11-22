@@ -1,5 +1,6 @@
 export { createApp } from "./api";
-export { WorkspaceRepo, git } from "./git";
+export { GitRepo, git } from "./git";
+export { Workspace, WorkspaceError } from "./workspace";
 export { MockBackend } from "./mock-backend";
 export { StaticProbe, TailscaleProbe } from "./probe";
 export { createController, serve } from "./server";

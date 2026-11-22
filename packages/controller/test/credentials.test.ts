@@ -55,7 +55,7 @@ describe("credentials API", () => {
     const cfg = JSON.parse(readFileSync(configPath, "utf8"));
     expect(cfg.agentEnv.OPENAI_API_KEY).toBe("sk-new");
     expect(cfg.apiToken).toBeDefined(); // the rest of the config is untouched
-    expect(cfg.workspaceRepoUrl).toBeDefined();
+    expect(cfg.workspaceDir).toBeDefined();
     expect(statSync(configPath).mode & 0o777).toBe(0o600);
 
     const res = await ctl.req("POST", "/api/pods", { template: "solo", machine: "m-vps" });

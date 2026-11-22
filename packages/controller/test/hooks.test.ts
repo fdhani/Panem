@@ -34,7 +34,7 @@ async function del(ctl: Ctl, id: string, query = "") {
 
 describe("before-destroy hooks", () => {
   test("agent hooks (by name), then the template's, run from /codebase before memory is saved", async () => {
-    // The template hook appends to memory: seeing that line in the workspace repo proves the
+    // The template hook appends to memory: seeing that line in the workspace folder proves the
     // hook ran in the pod before the save.
     const ws = workspaceWithHook(
       'echo "- noted by the hook in $PWD" >> "$HOME/.claude/projects/-codebase-api/memory/MEMORY.md"; echo "template" >> "$HOME/order"',

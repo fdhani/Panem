@@ -27,7 +27,7 @@ A template lists one or more agents. Listing `panem` too is optional:
 | postCreateCommand | `post-create.sh` | Clones `PANEM_POD.repos` into `/codebase/<repo>` at their refs; writes `~/.panem/pod.json`; saves the credentials named in `PANEM_AGENT_ENV`, plus the relay secret, to `~/.config/panem/env` (0600); runs every agent's `setup.sh`; writes `~/.panem/agents.json` |
 | postStartCommand | `post-start.sh` | Starts the port relay (tmux `panem-relay`), then every agent's `start.sh`. One agent failing doesn't stop the others. |
 
-The base doesn't copy CLAUDE.md, skills or memory. The controller copies synced files in, following the workspace repo's `panem.json`, between `post-create` and `post-start`.
+The base doesn't copy CLAUDE.md, skills or memory. The controller copies synced files in, following the workspace folder's `panem.json`, between `post-create` and `post-start`.
 
 DevPod (v0.6.x) doesn't run lifecycle hooks declared by Features, so Panem runs them itself over `devpod ssh`:
 - after `up`: `post-create.sh` once, then the controller's copy-in, then `post-start.sh`;

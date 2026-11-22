@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Config, saveConfig } from "@panem/core";
@@ -17,16 +17,16 @@ export function sh(cwd: string, cmd: string): string {
 
 const G = "git -c user.email=t@t -c user.name=t";
 
-/** A bare "origin" workspace repo with one template and some memory, plus a scratch clone. */
+/** A workspace folder with one template and some memory. */
 export function makeWorkspace() {
   const root = mkdtempSync(join(tmpdir(), "panem-ctl-"));
-  const origin = join(root, "origin.git");
-  const seed = join(root, "seed");
-  sh(root, `git init -q --bare -b main ${origin}`);
-  mkdirSync(join(seed, "templates/shop/.devcontainer"), { recursive: true });
-  mkdirSync(join(seed, "memory/api"), { recursive: true });
-  writeFileSync(
-    join(seed, "templates/shop/template.json"),
+  const dir = join(root, "workspace");
+  const write = (file: string, content: string) => {
+    mkdirSync(join(dir, file, ".."), { recursive: true });
+    writeFileSync(join(dir, file), content);
+  };
+  write(
+    "templates/shop/template.json",
     JSON.stringify({
       description: "Shop stack",
       repos: [
@@ -35,50 +35,37 @@ export function makeWorkspace() {
       ],
     }),
   );
-  writeFileSync(join(seed, "templates/shop/.devcontainer/devcontainer.json"), "{}");
-  mkdirSync(join(seed, "templates/broken"), { recursive: true });
-  writeFileSync(join(seed, "templates/broken/template.json"), '{"repos": []}');
-  writeFileSync(join(seed, "memory/api/MEMORY.md"), "# API memory\n- uses postgres\n");
-  writeFileSync(join(seed, ".gitattributes"), "memory/** merge=union\n");
-  writeFileSync(join(seed, "CLAUDE.md"), "be nice\n");
-  sh(
-    seed,
-    `git init -q -b main && git add -A && ${G} commit -qm seed && git push -q ${origin} main`,
-  );
+  write("templates/shop/.devcontainer/devcontainer.json", "{}");
+  write("templates/broken/template.json", '{"repos": []}');
+  write("memory/api/MEMORY.md", "# API memory\n- uses postgres\n");
+  write("CLAUDE.md", "be nice\n");
   return {
     root,
-    origin,
-    /** Clone origin fresh and return its path. */
-    clone(name: string) {
-      const dir = join(root, name);
-      sh(root, `git clone -q ${origin} ${name}`);
-      return dir;
-    },
-    /** Push a change from "another machine". */
-    pushFrom(name: string, file: string, content: string) {
-      const dir = join(root, name);
-      sh(root, `rm -rf ${name} && git clone -q ${origin} ${name}`);
-      mkdirSync(join(dir, file, ".."), { recursive: true });
-      writeFileSync(join(dir, file), content);
-      sh(dir, `git add -A && ${G} commit -qm ext && git push -q origin main`);
+    dir,
+    /** Change a file in the workspace (the name says who; kept for readability). */
+    pushFrom(_who: string, file: string, content: string) {
+      write(file, content);
     },
     read(file: string) {
-      return sh(root, `git --git-dir=${origin} show main:${file}`);
+      return readFileSync(join(dir, file), "utf8");
     },
+    /** A fingerprint of every file in the workspace: equal before/after means nothing changed. */
     log() {
-      return sh(root, `git --git-dir=${origin} log --format=%s main`);
+      return sh(dir, "find . -type f -print0 | sort -z | xargs -0 sha1sum");
     },
   };
 }
 
 export async function makeController(opts: {
   dataDir?: string;
-  origin: string;
+  /** The workspace folder; omit for a controller with no workspace yet. */
+  dir?: string;
   root: string;
   forwarders?: Forwarders;
   relaySecret?: string;
   agentEnv?: Record<string, string>;
   hookTimeoutSec?: number;
+  workspaceHookTimeoutSec?: number;
   /** Keep the config in this file (written here, 0600), as `panem serve` does. */
   configPath?: string;
 }) {
@@ -88,8 +75,7 @@ export async function makeController(opts: {
   const probe = new StaticProbe({ vps: "online", mac: "online" });
   const config: Config = {
     forwarder: { portRange: [7600, 7699], controlPort: 7599, blockSize: 10 },
-    workspaceRepoUrl: opts.origin,
-    workspaceBranch: "main",
+    workspaceDir: opts.dir,
     apiToken: TOKEN,
     claudeOauthToken: "oauth-xyz",
     port: 0,
@@ -100,6 +86,8 @@ export async function makeController(opts: {
     agentEnvUpdated: {},
   };
   const dataDir = opts.dataDir ?? mkdtempSync(join(opts.root, "data-"));
+  /** Everything the controller logged. */
+  const logs: string[] = [];
   if (opts.configPath) await saveConfig(config, opts.configPath);
   const ctl = await createController({
     config,
@@ -109,7 +97,8 @@ export async function makeController(opts: {
     probe,
     forwarders: opts.forwarders ?? noForwarders,
     hookTimeoutSec: opts.hookTimeoutSec,
-    log: () => {},
+    workspaceHookTimeoutSec: opts.workspaceHookTimeoutSec,
+    log: (m) => logs.push(m),
   });
   await ctl.service.refresh();
   const req = (method: string, path: string, body?: unknown) =>
@@ -118,7 +107,7 @@ export async function makeController(opts: {
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  return { ...ctl, backend, probe, dataDir, req };
+  return { ...ctl, backend, probe, dataDir, req, logs };
 }
 
 /** Wait until the predicate holds (pods settle asynchronously). */

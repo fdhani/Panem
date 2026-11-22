@@ -3,7 +3,8 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { type SyncSource, WORKSPACE_SOURCE } from "@panem/core";
-import { WorkspaceRepo } from "./git";
+import { GitRepo } from "./git";
+import type { Workspace } from "./workspace";
 
 /** A source's files on the controller, ready to read. */
 export interface Checkout {
@@ -16,22 +17,21 @@ export interface Checkout {
 }
 
 /**
- * Where synced files come from: the workspace repo, other git repos (cloned under
- * <data>/sources/<name>), or folders on the controller host.
+ * Where synced files come from: the workspace folder, other git repos (cloned under
+ * <data>/sources/<name>), or other folders on the controller host.
  */
 export class Sources {
-  private readonly repos = new Map<string, WorkspaceRepo>();
+  private readonly repos = new Map<string, GitRepo>();
 
-  constructor(private readonly o: { dataDir: string; workspace: WorkspaceRepo; home?: string }) {}
+  constructor(private readonly o: { dataDir: string; workspace: Workspace; home?: string }) {}
 
-  /** The git client for a source, or undefined for a dir source. */
-  repo(name: string, spec: SyncSource | undefined): WorkspaceRepo | undefined {
-    if (name === WORKSPACE_SOURCE) return this.o.workspace;
-    if (!spec || !("git" in spec)) return undefined;
+  /** The git client for a git source, or undefined for a folder (incl. the workspace). */
+  repo(name: string, spec: SyncSource | undefined): GitRepo | undefined {
+    if (name === WORKSPACE_SOURCE || !spec || !("git" in spec)) return undefined;
     const key = `${name}\0${spec.git}\0${spec.ref}`;
     let r = this.repos.get(key);
     if (!r) {
-      r = new WorkspaceRepo(join(this.o.dataDir, "sources", name), spec.git, spec.ref);
+      r = new GitRepo(join(this.o.dataDir, "sources", name), spec.git, spec.ref);
       this.repos.set(key, r);
     }
     return r;
@@ -44,10 +44,13 @@ export class Sources {
   }
 
   /**
-   * Files of a source: a git source at `commit` (or freshly pulled when omitted), a dir source
-   * as it is now. For git, the files are extracted to a temp folder.
+   * Files of a source: a git source at `commit` (or freshly pulled when omitted), a folder
+   * (the workspace, or a dir source) as it is now. For git, the files are extracted to a temp
+   * folder.
    */
   async checkout(name: string, spec: SyncSource | undefined, commit?: string): Promise<Checkout> {
+    if (name === WORKSPACE_SOURCE)
+      return { root: await this.o.workspace.dir(), done: async () => {} };
     const repo = this.repo(name, spec);
     if (!repo) {
       const root = this.dir(spec as { dir: string });
