@@ -99,6 +99,8 @@ With the folder as a git repo (`git init`, add a remote, push once), templates y
 4. **Copy-in:** the controller copies the synced files in (CLAUDE.md, skills, memory, overlays, whatever the rules say). It keeps a copy of the memory it sent, under `~/.local/share/panem/pods/<id>/memory-base/`, to merge against when the pod is deleted.
 5. **Start hook** (`post-start.sh`): starts the port relay and `claude remote-control --name <pod id>` in tmux. It also runs on every later start.
 
+Panem starts nothing else. Templates shouldn't start databases or backends in `postStartCommand` either, since pods would then run them all the time. The agent starts them when a task needs them; the scaffolded `CLAUDE.md` tells it how ("Services"). If your templates do start services, drop that line. Ports a service opens appear on the pod card as usual, closed until you switch them on.
+
 Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.panem/`; DevPod's own copy of the workspace folder is in `/workspaces/<pod-id>/`, and Panem doesn't use it.
 
 ## Reaching pod services (ports)

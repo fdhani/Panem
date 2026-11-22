@@ -6,7 +6,7 @@
     "ghcr.io/devcontainers/features/node:1": {},
     "ghcr.io/devcontainers/features/docker-in-docker:2": {},
     "ghcr.io/fdhani/panem/claude-code:0": { "permissionMode": "acceptEdits" }
-  },
-  // Dev servers: runs on every start, after the Feature's Remote Control hook.
-  "postStartCommand": "cd /codebase/api && (docker compose up -d || true)"
+  }
+  // No postStartCommand starting services (databases, backends): they'd run on every pod
+  // start. The agent starts what a task needs, when it needs it (see CLAUDE.md).
 }
