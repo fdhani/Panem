@@ -58,6 +58,7 @@ beforeAll(() => {
   writeFileSync(join(ctx, "skills/deploy/SKILL.md"), "skill\n");
   env = {
     PANEM_CODE_ROOT: ws,
+    // No longer read by post-create (the controller copies synced files); set to show that.
     PANEM_CONTEXT_DIR: ctx,
     CLAUDE_CODE_OAUTH_TOKEN: "tok-123",
     PANEM_RELAY_SECRET: "sec-1",

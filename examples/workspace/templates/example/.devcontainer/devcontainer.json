@@ -7,9 +7,6 @@
     "ghcr.io/devcontainers/features/docker-in-docker:2": {},
     "ghcr.io/fdhani/panem/claude-code:0": { "permissionMode": "acceptEdits" }
   },
-  "containerEnv": {
-    "PANEM_CONTEXT_DIR": "${containerWorkspaceFolder}"
-  },
   // Dev servers: runs on every start, after the Feature's Remote Control hook.
   "postStartCommand": "cd /codebase/api && (docker compose up -d || true)"
 }

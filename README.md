@@ -62,10 +62,13 @@ The UI and API listen only on `127.0.0.1` and the host's Tailscale IP (port 7420
 
 ## How a pod is built
 
-1. The controller pulls the workspace repo and records its commit (`workspaceSha`).
-2. It runs `devpod up <workspace repo>@<branch> --devcontainer-path templates/<t>/... --provider m-<host>`. The pod metadata (`PANEM_POD`) and the Claude token are passed through a 0600 env file.
-3. The Feature's **postCreateCommand** clones each repo at its ref (only pushed work is reachable) and copies CLAUDE.md, skills, plans, and `memory/<repo>` into `~/.claude`. It also pre-trusts `/codebase/*`, and keeps Panem's own files (pod.json, logs) in `~/.panem/`.
-4. The Feature's **postStartCommand** (re)starts `claude remote-control --name <pod id>` in tmux on every start.
+1. The controller pulls the workspace repo, resolves the pod's sync rules from `panem.json` (see below), and saves them with the pod.
+2. It runs `devpod up <workspace repo>@<branch> --devcontainer-path templates/<t>/... --provider m-<host>`. The pod metadata (`PANEM_POD`), the Claude token and the relay secret are passed through a 0600 env file.
+3. **One-time setup** (the Feature's `post-create.sh`): clones each code repo at its ref into `/codebase/<repo>` (only pushed work is reachable), pre-trusts `/codebase/*`, and keeps Panem's own files (pod.json, logs) in `~/.panem/`.
+4. **Copy-in:** the controller copies the synced files in (CLAUDE.md, skills, memory, overlays, whatever the rules say) and records exactly what it sent.
+5. **Start hook** (`post-start.sh`): starts the port relay and `claude remote-control --name <pod id>` in tmux. It also runs on every later start.
+
+Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.panem/`; DevPod's own checkout of the workspace repo is in `/workspaces/<pod-id>/`, and Panem doesn't use it.
 
 ## Reaching pod services (ports)
 
@@ -93,15 +96,62 @@ phone ──tailnet──▶ vps:7601 ──▶ panem-forwarder ──docker net
 - **Repair:** `panem machine repair <name>` (or **Repair** in the UI) redeploys a forwarder. Outdated or unresponsive forwarders are also redeployed automatically.
 - **Who can reach the services:** anyone on your tailnet, without the API token. Use Tailscale ACLs to narrow that if needed.
 
-## Memory export
+## Synced files (`panem.json`)
 
-Delete runs as a queued job, one at a time:
-1. Start the pod if it is stopped.
-2. Pull every `~/.claude/projects/-codebase-<repo>/memory/**` file out of the pod (pods created before the `/codebase` rename use `-workspace-<repo>`, which is still recognised).
-3. Merge each file three ways with `git merge-file --union`: the current file, the file at `workspaceSha`, and the pod's file. Lines added on both sides are all kept.
-4. Commit, push (retrying on push races), and only then delete the pod.
+What goes into a pod at create time, and what comes back on delete, is set by `panem.json` at the root of the workspace repo. Without it, the defaults apply, which are what Panem always did:
+- `CLAUDE.md`, `skills/`, `plans/`, `agents/` and `commands/` are copied into `~/.claude/`.
+- `memory/<repo>/` is copied in to Claude's memory folder for that repo, and merged back on delete.
 
-If the push fails, the pod stays in `error` with a **Retry export** action. If the machine is offline, delete is blocked; **Force delete** discards the memory. `.gitattributes` sets `memory/** merge=union` so edits you push from elsewhere also merge cleanly.
+```json
+{
+  "sources": {
+    "overlay": { "git": "git@github.com:you/claude-overlay.git", "ref": "main" },
+    "local":   { "dir": "~/claude-context" }
+  },
+  "sync": [
+    { "from": "CLAUDE.md", "to": "~/.claude/CLAUDE.md" },
+    { "from": "memory/{repo}/**", "to": "~/.claude/projects/-codebase-{repo}/memory/**", "flow": "both" },
+    { "source": "overlay", "from": "{repo}/**", "to": "/codebase/{repo}/**", "flow": "both" },
+    { "source": "local", "from": "skills/**", "to": "~/.claude/skills/**" }
+  ],
+  "exclude": ["**/.DS_Store"]
+}
+```
+
+**Sources** are where files come from:
+- **The workspace repo:** any rule without `source`.
+- **Other git repos** (`git` + `ref`): the controller clones and pulls them itself. An empty repo is fine; the first export gives it its first commit.
+- **Folders on the controller host** (`dir`).
+
+**Rules:**
+- `from` is a path in the source, `to` a path in the pod. Each is either one file, or a folder ending in `/**` whose contents are carried over.
+- `{repo}` repeats the rule for each of the pod's repos.
+- `flow`: `in` (copied in at create, the default), `out` (only collected on delete), or `both`.
+- `merge` (for `out`/`both`): `union` (the default; keeps every line either side added) or `pod` (the pod's version wins where both changed).
+- `include` narrows a folder rule (e.g. `"**/*.md"`). `exclude`, global or per rule, drops files; both are globs (`**`, `*`, `?`).
+- A template's own `sync` (in `template.json`) replaces the list for its pods, and its `syncExclude` adds excludes.
+
+**Where files can go in the pod:**
+- **`~/...`** is your personal setup.
+- **`/codebase/{repo}/...`** is an **overlay** for files a codebase doesn't commit, such as a CLAUDE.md or spec-kit files. Overlays never overwrite files the repo tracks (the committed version wins, and a note is logged). They're added to the repo's `.git/info/exclude`, so `git status` stays clean and they can't be committed by accident.
+
+**Checked when the rules load** (a bad rule shows as a template error and blocks summon):
+- No `..` and nothing inside `.git`.
+- Nothing may write into `~/.panem` or `~/.config/panem`.
+- Rules that write back may not cover the workspace repo's `panem.json`, `.gitattributes` or `templates/`.
+
+**On delete**, a queued job runs, one at a time:
+1. Start the pod if it's stopped.
+2. Collect the files of every `out`/`both` rule. For overlays, that's new untracked files that aren't gitignored, plus the overlaid files; never tracked ones, and never `node_modules`-style ignored files. The limit is 50 MB packed and 5,000 files.
+3. Merge each file three ways, against what the pod was sent: the commit for git sources, a snapshot for folders.
+   - Text: `git merge-file` (union or pod wins).
+   - Binary files: taken only if the source didn't change meanwhile.
+   - Deletions never propagate.
+4. Commit and push each git source (retrying on push races), and write folder sources in place. The pod is deleted only after every source succeeded.
+
+If a source fails, the pod stays in `error` with **Retry export**, which redoes only the sources that didn't finish. If the machine is offline, delete is blocked; **Force delete** discards the pod's changes.
+
+Export always uses the rules the pod was created with, even if `panem.json` changed since. Pods created before this feature export memory with the defaults, including pre-rename `-workspace-<repo>` folders.
 
 ## Development
 
@@ -126,6 +176,8 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 ## Known gaps and things to verify
 
 - Whether DevPod containers come back after a host reboot (restart policy) is untested. Pods may need `panem pod start` afterwards.
+- Copy-in uses stdin through `devpod ssh`, and falls back to sending base64 in chunks if stdin doesn't arrive. CI's integration test reports which path DevPod used. The in-pod scripts need GNU `tar` (Debian and Ubuntu images have it; busybox tar on Alpine doesn't support every flag they use).
+- Pods built from a Feature release before 0.3.0 still copy the default context during setup. That's harmless, but default paths a `panem.json` excludes will still appear on those pods.
 - Remote Control running headless with `CLAUDE_CODE_OAUTH_TOKEN` must be confirmed on a real pod. Its output is logged to `~/.panem/remote-control.log`.
 - Cloning private repos inside a pod relies on DevPod forwarding the controller's git credentials during `up`.
 - Back up `~/.devpod` on the controller. If it is lost, re-add the machines; pods that DevPod lists again can be re-labelled with `panem rediscover`.

@@ -1,0 +1,17 @@
+{
+  "sources": {},
+  "sync": [
+    { "from": "CLAUDE.md", "to": "~/.claude/CLAUDE.md" },
+    { "from": "skills/**", "to": "~/.claude/skills/**" },
+    { "from": "plans/**", "to": "~/.claude/plans/**" },
+    { "from": "agents/**", "to": "~/.claude/agents/**" },
+    { "from": "commands/**", "to": "~/.claude/commands/**" },
+    {
+      "from": "memory/{repo}/**",
+      "to": "~/.claude/projects/-codebase-{repo}/memory/**",
+      "flow": "both",
+      "merge": "union"
+    }
+  ],
+  "exclude": ["**/.DS_Store"]
+}
