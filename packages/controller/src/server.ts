@@ -94,7 +94,7 @@ export async function serve(config: Config, configPath?: string) {
   }
   await service.resumeJobs();
   if (!config.relaySecret || !config.forwarderToken) {
-    console.warn("[panem] port forwarding off: run `panem init --force` to add its secrets");
+    console.warn("[panem] port forwarding off: restart `panem serve` to add its secrets");
   }
   const poll = async () => {
     try {

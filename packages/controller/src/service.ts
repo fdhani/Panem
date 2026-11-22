@@ -225,7 +225,10 @@ export class PodService {
   async repairMachine(name: string, ref?: MachineRef): Promise<ForwarderStatus> {
     const f = this.d.forwarders;
     if (!f?.enabled)
-      throw new HttpError(409, "port forwarding is not configured (run `panem init --force`)");
+      throw new HttpError(
+        409,
+        "port forwarding is not configured (restart `panem serve` to add its secrets)",
+      );
     const m = ref ?? (await this.d.backend.listMachines()).find((x) => x.name === name);
     if (!m) throw new HttpError(404, `machine ${name} not registered`);
     this.lastRepair.set(m.name, Date.now());
@@ -355,7 +358,10 @@ export class PodService {
     if (!meta) throw new HttpError(404, `pod ${id} not found`);
     const f = this.d.forwarders;
     if (!f?.enabled) {
-      throw new HttpError(409, "port forwarding is not configured (run `panem init --force`)");
+      throw new HttpError(
+        409,
+        "port forwarding is not configured (restart `panem serve` to add its secrets)",
+      );
     }
     const current = new Set(this.desiredExposure(meta));
     if (exposed) current.add(port);

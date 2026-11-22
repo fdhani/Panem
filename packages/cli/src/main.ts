@@ -12,6 +12,7 @@ import {
   removeCredential,
   saveConfig,
   setCredential,
+  upgradeConfig,
 } from "@panem/core";
 import { defineCommand, runMain } from "citty";
 import { client, table } from "./client";
@@ -24,17 +25,8 @@ const serve = defineCommand({
   meta: { name: "serve", description: "Run the controller (API + web UI)" },
   async run() {
     const { serve } = await import("@panem/controller");
-    let cfg = await loadConfig();
-    // Configs from before port forwarding lack its secrets: add them once.
-    if (!cfg.relaySecret || !cfg.forwarderToken) {
-      cfg = {
-        ...cfg,
-        relaySecret: cfg.relaySecret ?? secret(),
-        forwarderToken: cfg.forwarderToken ?? secret(),
-      };
-      await saveConfig(cfg);
-      console.log("[panem] added port-forwarding secrets to the config");
-    }
+    const { cfg, notes } = await upgradeConfig(secret);
+    for (const n of notes) console.log(`[panem] ${n}`);
     await serve(cfg, configPath());
     await new Promise(() => {});
   },
@@ -52,32 +44,52 @@ const init = defineCommand({
     port: { type: "string", default: "7420" },
     "claude-token": {
       type: "string",
-      description: "Token from `claude setup-token` (or set CLAUDE_CODE_OAUTH_TOKEN)",
+      description:
+        "Deprecated: puts the token in your shell history. Use `panem env set CLAUDE_CODE_OAUTH_TOKEN`",
     },
     devpod: { type: "string", default: "devpod", description: "Path to the devpod binary" },
-    force: { type: "boolean", description: "Overwrite an existing config" },
+    force: {
+      type: "boolean",
+      description: "Start over: new API token and secrets, all credentials removed",
+    },
   },
   async run({ args }) {
     const path = configPath();
     if (existsSync(path) && !args.force) {
-      throw new Error(`${path} exists; pass --force to overwrite`);
+      throw new Error(
+        `${path} exists. --force starts over: a new API token and secrets, and all credentials removed. To change a credential use \`panem env set NAME\`.`,
+      );
     }
+    if (args["claude-token"]) {
+      console.error(
+        "warning: --claude-token is deprecated: it leaves the token in your shell history. " +
+          "Use `panem env set CLAUDE_CODE_OAUTH_TOKEN` instead.",
+      );
+    }
+    const claudeToken = args["claude-token"] || process.env.CLAUDE_CODE_OAUTH_TOKEN;
     const cfg = Config.parse({
       workspaceRepoUrl: args["workspace-repo"],
       workspaceBranch: args.branch,
       apiToken: secret(),
       relaySecret: secret(),
       forwarderToken: secret(),
-      claudeOauthToken: args["claude-token"] ?? process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      ...(claudeToken
+        ? {
+            agentEnv: { CLAUDE_CODE_OAUTH_TOKEN: claudeToken },
+            agentEnvUpdated: { CLAUDE_CODE_OAUTH_TOKEN: new Date().toISOString() },
+          }
+        : {}),
       port: Number(args.port),
       devpodPath: args.devpod,
     });
     await saveConfig(cfg, path);
     console.log(`wrote ${path}`);
     console.log(`API token (paste into the web UI settings): ${cfg.apiToken}`);
-    if (!cfg.claudeOauthToken) {
-      console.log("No Claude token set: pods will need a manual `claude /login`.");
-      console.log("Run `claude setup-token`, then `panem init --force --claude-token ...`.");
+    if (!claudeToken) {
+      console.log("No Claude token set: pods would need a manual `claude /login`. To set one:");
+      console.log(
+        "  run `claude setup-token`, then `panem env set CLAUDE_CODE_OAUTH_TOKEN` (or Settings → Agent credentials).",
+      );
     }
   },
 });

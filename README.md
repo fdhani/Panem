@@ -43,8 +43,9 @@ On the controller host (Ubuntu) you need `docker`, `git`, `tailscale`, and [DevP
 bun install && bun run build                # -> dist/panem (single binary, UI embedded)
 deploy/install.sh                           # ~/.local/bin/panem + systemd user service
 
+panem init --workspace-repo git@github.com:you/workspace.git
 claude setup-token                          # long-lived token so pods start logged in
-panem init --workspace-repo git@github.com:you/workspace.git --claude-token <token>
+panem env set CLAUDE_CODE_OAUTH_TOKEN       # paste it at the hidden prompt (or use Settings in the UI)
 systemctl --user enable --now panem
 panem token                                 # paste into the web UI's Settings
 ```
@@ -110,7 +111,8 @@ Panem itself is agent-agnostic. Agents are devcontainer Features that a template
   { "repos": [ ... ], "env": ["CLAUDE_CODE_OAUTH_TOKEN"] }
   ```
 - A template without `env` gets just `CLAUDE_CODE_OAUTH_TOKEN`, as before.
-- `panem init --claude-token` still sets that one.
+- `panem init --claude-token` still sets that one, but it's deprecated: it leaves the token in your shell history.
+- `panem init --force` starts over: a new API token and secrets, and all credentials removed. To change one credential, use `panem env set`.
 - Changes apply to the next summon, with no restart.
 
 **Sync presets:** `{ "preset": "claude-code" }` in a `sync` list stands for Claude Code's files (CLAUDE.md, skills, plans, agents and commands into `~/.claude/`, plus per-repo memory both ways). It's also the default.
