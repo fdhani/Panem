@@ -20,6 +20,16 @@ export const EnvName = z
 /** Credentials a template gets when it doesn't list `env`. */
 export const DEFAULT_TEMPLATE_ENV = ["CLAUDE_CODE_OAUTH_TOKEN"];
 
+/** What the API says about one agent credential. Never its value. */
+export interface CredentialInfo {
+  name: string;
+  set: boolean;
+  /** When the value was last set, if known. */
+  updatedAt?: string;
+  /** Templates whose pods get it (their `env`, or the Claude token by default). */
+  usedBy: string[];
+}
+
 /** Commands a template runs in its pods at lifecycle points. */
 export const TemplateHooks = z
   .object({
@@ -196,6 +206,8 @@ export const Config = z.object({
   claudeOauthToken: z.string().optional(),
   /** Agent credentials, by env var name. Each template lists which ones its pods get. */
   agentEnv: z.record(EnvName, z.string().min(1)).default({}),
+  /** When each agentEnv value was last set (ISO time). Values set before this was kept have none. */
+  agentEnvUpdated: z.record(EnvName, z.string()).default({}),
   port: z.number().int().default(7420),
   devpodPath: z.string().default("devpod"),
   /** Extra listen addresses; the Tailscale IP is added automatically when found. */

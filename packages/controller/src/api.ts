@@ -1,15 +1,24 @@
-import { AddMachineRequest, PortNumber, SetPortExposure, SummonRequest } from "@panem/core";
+import {
+  AddMachineRequest,
+  EnvName,
+  PortNumber,
+  SetPortExposure,
+  SummonRequest,
+} from "@panem/core";
 import { BackendError } from "@panem/core";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import type { z } from "zod";
+import { z } from "zod";
+import type { Credentials } from "./credentials";
 import { HttpError, type PodService, msg } from "./service";
 import type { Templates } from "./templates";
 
 export interface ApiDeps {
   service: PodService;
   templates: Templates;
+  credentials: Credentials;
   apiToken: string;
+  log?: (msg: string) => void;
   /** Static UI assets: path -> Blob. Missing means API-only. */
   ui?: Map<string, Blob>;
 }
@@ -39,6 +48,14 @@ async function body<T extends z.ZodTypeAny>(req: Request, schema: T): Promise<z.
   }
   return r.data;
 }
+
+const SetCredential = z.object({
+  value: z
+    .string()
+    .trim()
+    .min(1, "empty value")
+    .max(64 * 1024),
+});
 
 export function createApp(d: ApiDeps): Hono {
   const app = new Hono();
@@ -104,6 +121,34 @@ export function createApp(d: ApiDeps): Hono {
     });
     return pod ? c.json(pod, 202) : c.body(null, 204);
   });
+  // Agent credentials: write-only. Responses carry names and whether each is set, never values.
+  const credentialName = (raw: string) => {
+    const r = EnvName.safeParse(raw);
+    if (!r.success) throw new HttpError(400, `${raw}: ${r.error.issues[0]!.message}`);
+    return r.data;
+  };
+  const log = d.log ?? ((m: string) => console.log(`[panem] ${m}`));
+  app.get("/api/credentials", async (c) => {
+    const templates = await d.templates.list().then(
+      (r) => r.templates,
+      () => [],
+    );
+    return c.json(await d.credentials.describe(templates));
+  });
+  app.put("/api/credentials/:name", async (c) => {
+    const name = credentialName(c.req.param("name"));
+    const { value } = await body(c.req.raw, SetCredential);
+    await d.credentials.set(name, value);
+    log(`credential ${name} set from the web UI`);
+    return c.body(null, 204);
+  });
+  app.delete("/api/credentials/:name", async (c) => {
+    const name = credentialName(c.req.param("name"));
+    await d.credentials.remove(name);
+    log(`credential ${name} removed from the web UI`);
+    return c.body(null, 204);
+  });
+
   app.post("/api/rediscover", async (c) => c.json(await service.rediscover()));
 
   app.get("/api/jobs", (c) => c.json(service.snapshot().find((e) => e.type === "jobs")));

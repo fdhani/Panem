@@ -1,4 +1,12 @@
-import type { Job, Machine, Pod, ServerEvent, SummonRequest, Template } from "@panem/core";
+import type {
+  CredentialInfo,
+  Job,
+  Machine,
+  Pod,
+  ServerEvent,
+  SummonRequest,
+  Template,
+} from "@panem/core";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
@@ -24,6 +32,8 @@ export function setToken(t: string) {
 
 let memoryToken = "";
 const token = () => getToken() || memoryToken;
+/** Whether a token is entered (saved, or for this page load in private mode). */
+export const hasToken = () => !!token();
 
 export class ApiError extends Error {
   constructor(
@@ -63,7 +73,14 @@ export const keys = {
   machines: ["machines"] as const,
   jobs: ["jobs"] as const,
   templates: ["templates"] as const,
+  credentials: ["credentials"] as const,
 };
+
+export const useCredentials = () =>
+  useQuery({
+    queryKey: keys.credentials,
+    queryFn: () => api<CredentialInfo[]>("GET", "/api/credentials"),
+  });
 
 export const usePods = () =>
   useQuery({ queryKey: keys.pods, queryFn: () => api<Pod[]>("GET", "/api/pods") });

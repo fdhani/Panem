@@ -23,11 +23,15 @@ export function Dialog({
     const d = ref.current;
     if (!d) return;
     if (open && !d.open) {
+      // Remembered here: the browser only restores focus on close(), not when the dialog is
+      // removed from the page (a dialog rendered only while open).
+      const opener = document.activeElement as HTMLElement | null;
       d.showModal();
       const overflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       return () => {
         document.body.style.overflow = overflow;
+        if (opener?.isConnected) opener.focus();
       };
     }
     if (!open && d.open) d.close();

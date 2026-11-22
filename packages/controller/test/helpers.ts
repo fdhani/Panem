@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Config } from "@panem/core";
+import { type Config, saveConfig } from "@panem/core";
 import type { Forwarders } from "../src/forwarders";
 import { MockBackend } from "../src/mock-backend";
 import { StaticProbe } from "../src/probe";
@@ -79,6 +79,8 @@ export async function makeController(opts: {
   relaySecret?: string;
   agentEnv?: Record<string, string>;
   hookTimeoutSec?: number;
+  /** Keep the config in this file (written here, 0600), as `panem serve` does. */
+  configPath?: string;
 }) {
   const backend = new MockBackend();
   await backend.addMachine({ name: "m-vps", host: "vps" });
@@ -95,10 +97,13 @@ export async function makeController(opts: {
     listen: ["127.0.0.1"],
     relaySecret: opts.relaySecret,
     agentEnv: opts.agentEnv ?? {},
+    agentEnvUpdated: {},
   };
   const dataDir = opts.dataDir ?? mkdtempSync(join(opts.root, "data-"));
+  if (opts.configPath) await saveConfig(config, opts.configPath);
   const ctl = await createController({
     config,
+    configPath: opts.configPath,
     dataDir,
     backend,
     probe,
