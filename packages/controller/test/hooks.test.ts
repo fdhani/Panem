@@ -111,13 +111,19 @@ describe("before-destroy hooks", () => {
     expect(ctl.service.get(pod.id).error).toContain("timed out after 1s");
   });
 
-  test("delete without saving skips the hooks", async () => {
+  test("delete without saving works on a running pod and skips hooks and the memory save", async () => {
     const ws = workspaceWithHook("exit 1");
     const ctl = await makeController(ws);
     const pod = await summon(ctl);
+    expect(pod.state).toBe("running");
+    ctl.backend.writeMemory(pod.id, "api", "MEMORY.md", "- not saved\n");
+    const before = ws.log();
     await del(ctl, pod.id, true);
     expect(ctl.service.podList()).toEqual([]);
+    expect(ctl.backend.pods.has(pod.id)).toBe(false);
     expect(ctl.backend.events).not.toContain(`before-destroy:${pod.id}`);
+    expect(ctl.backend.events).not.toContain(`save-memory:${pod.id}`);
+    expect(ws.log()).toBe(before);
   });
 
   test("the hook saved at summon runs, even if template.json changed since", async () => {
