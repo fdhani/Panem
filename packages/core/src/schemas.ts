@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { GitRef } from "./refs";
+import { ResolvedSync, SyncRule } from "./sync";
+
+export { GitRef } from "./refs";
 
 /** Lowercase name usable in DevPod ids, provider names, and paths. */
 export const Slug = z
@@ -6,14 +10,6 @@ export const Slug = z
   .min(1)
   .max(40)
   .regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, "lowercase letters, digits, and dashes only");
-
-/** Git ref: branch, tag, or commit. Rejects anything that could become a CLI flag. */
-export const GitRef = z
-  .string()
-  .min(1)
-  .max(200)
-  .regex(/^[A-Za-z0-9._/-]+$/, "invalid git ref")
-  .refine((r) => !r.startsWith("-") && !r.includes(".."), "invalid git ref");
 
 export const TemplateRepo = z.object({
   /** Folder name under /codebase. */
@@ -36,6 +32,10 @@ export const Template = z.object({
   ports: PortNames.optional(),
   /** Ports never exposed (e.g. debuggers, internal agents). */
   ignorePorts: z.array(PortNumber).optional(),
+  /** Replaces panem.json's `sync` rules for pods of this template. */
+  sync: z.array(SyncRule).optional(),
+  /** Added to panem.json's `exclude` for pods of this template. */
+  syncExclude: z.array(z.string().min(1)).optional(),
   /** Path inside the workspace repo, relative to its root. Defaults to the template's .devcontainer folder. */
   devcontainerPath: z.string().min(1).optional(),
 });
@@ -93,6 +93,11 @@ export const PodMeta = z.object({
    * everything else stays closed until switched on.
    */
   exposePorts: z.array(PortNumber).optional(),
+  /**
+   * The sync rules and sources resolved at summon, plus what was sent (merge bases).
+   * Export uses this, never the workspace repo's current panem.json. Absent on older pods.
+   */
+  sync: ResolvedSync.optional(),
 });
 export type PodMeta = z.infer<typeof PodMeta>;
 
