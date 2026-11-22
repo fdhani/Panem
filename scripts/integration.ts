@@ -107,7 +107,21 @@ try {
   assert(listed?.status === "running", `running after up (got ${listed?.status})`);
 
   step("context injected");
-  assert((await run("test -d /workspace/hello/.git")).code === 0, "repo cloned");
+  if ((await run("test -d /workspace/hello/.git")).code !== 0) {
+    // Print what the pod looks like so a CI failure is diagnosable without a debugger.
+    for (const cmd of [
+      "id; echo HOME=$HOME; pwd",
+      "env | grep -E '^PANEM|^DEVPOD|^REMOTE' | sed 's/=.*SECRET.*/=<redacted>/' || true",
+      "ls -la /workspace /workspace/.panem /usr/local/share/panem 2>&1",
+      "cat /workspace/.panem/post-create.log 2>&1",
+      "ls -la ~ ~/.claude 2>&1",
+      "ls / ; ls /workspaces 2>&1 | head",
+    ]) {
+      const r = await run(cmd);
+      console.log(`\n$ ${cmd}\n${r.out}\n${r.err}`);
+    }
+    assert(false, "repo cloned");
+  }
   assert(
     (await run("git -C /workspace/hello rev-parse --abbrev-ref HEAD")).out === "master",
     "ref",

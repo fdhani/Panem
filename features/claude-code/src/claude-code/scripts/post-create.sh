@@ -7,9 +7,13 @@ set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
+mkdir -p "$PANEM_STATE_DIR" "$CLAUDE_HOME"
+# Keep a log inside the pod: lifecycle output is otherwise easy to lose.
+exec > >(tee -a "$PANEM_STATE_DIR/post-create.log") 2>&1
+log "post-create start: user=$(id -un) pwd=$PWD pod_env=${PANEM_POD:+set}"
+
 POD="$(pod_json)"
 CONTEXT_DIR="${PANEM_CONTEXT_DIR:-$PWD}"
-mkdir -p "$PANEM_STATE_DIR" "$CLAUDE_HOME"
 
 # ---- 1. repos ----
 count="$(printf '%s' "$POD" | jq '.repos | length // 0')"
