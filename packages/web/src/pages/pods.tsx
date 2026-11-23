@@ -15,7 +15,6 @@ import {
 import { useState } from "react";
 import { type DeleteChoice, DeleteDialog } from "../components/delete-dialog";
 import { MachineDot, PodStateBadge } from "../components/status";
-import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { api, keys, queryClient, useJobs, usePods } from "../lib/api";
@@ -218,64 +217,6 @@ function PodIssues({ pod }: { pod: Pod }) {
       <span className="shrink-0 font-medium">Details</span>
       <ChevronRight className="size-4 shrink-0" />
     </Link>
-  );
-}
-
-const AGENT_STATE: Record<string, { label: string; tone: "ok" | "warn" | "bad" | "muted" }> = {
-  running: { label: "Running", tone: "ok" },
-  "needs-login": { label: "Needs sign-in", tone: "warn" },
-  error: { label: "Error", tone: "bad" },
-  stopped: { label: "Off", tone: "muted" },
-};
-
-/**
- * Each agent's state, as it reports it (agent_status in the pod), with what to do next. Generic:
- * any agent Feature that follows the contract shows up the same way.
- */
-export function Agents({ pod }: { pod: Pod }) {
-  const retry = useMutation({
-    mutationFn: (agent: string) => api("POST", `/api/pods/${pod.id}/agents/${agent}/restart`),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: keys.pods }),
-  });
-  return (
-    <ul className="flex flex-col gap-2">
-      {(pod.agents ?? []).map((a) => {
-        const st = a.status ? AGENT_STATE[a.status.state] : undefined;
-        return (
-          <li key={a.id} className="flex flex-col gap-1 text-xs">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-medium text-text">{a.label || a.id}</span>
-              {st && <Badge tone={st.tone}>{st.label}</Badge>}
-              <span className="text-muted">
-                session <span className="font-mono">{pod.id}</span>
-              </span>
-            </div>
-            {a.status?.state === "needs-login" && (
-              <div className="rounded-lg bg-warn/10 px-3 py-2 text-warn">
-                <p>{a.status.message || "This agent needs you to sign in."}</p>
-                <p className="mt-1">
-                  {a.login?.label ?? "Sign in"}: on the controller, run{" "}
-                  <code className="font-mono break-all">
-                    panem pod login {pod.id} {a.id}
-                  </code>
-                  . One sign-in serves every pod on this machine.
-                </p>
-              </div>
-            )}
-            {a.status?.state === "error" && (
-              <div className="flex flex-wrap items-center gap-2 rounded-lg bg-bad/10 px-3 py-2 text-bad">
-                <p className="min-w-0 flex-1 break-words">
-                  {a.status.message || "The agent stopped."}
-                </p>
-                <Button size="sm" disabled={retry.isPending} onClick={() => retry.mutate(a.id)}>
-                  Retry
-                </Button>
-              </div>
-            )}
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 

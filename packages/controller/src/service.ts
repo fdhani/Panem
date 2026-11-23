@@ -707,6 +707,18 @@ export class PodService {
     }
   }
 
+  /** The last lines of an agent's own log (agent.json "log"), as it wrote them. */
+  async agentLog(id: string, agent: string): Promise<string> {
+    const pod = this.get(id);
+    const a = (pod.agents ?? []).find((x) => x.id === agent);
+    if (!a) throw new HttpError(404, `pod ${id} has no agent ${agent}`);
+    if (!a.log) throw new HttpError(404, `agent ${agent} keeps no log`);
+    if (pod.state !== "running") throw new HttpError(409, `pod ${id} isn't running`);
+    const rel = a.log.slice(2).replace(/'/g, "");
+    const r = await this.d.backend.exec(id, `tail -n 1000 "$HOME/${rel}" 2>/dev/null || true`);
+    return new TextDecoder().decode(r.stdout);
+  }
+
   /** Restart one agent in a pod (e.g. after `panem pod login`) and re-read its status. */
   async restartAgent(id: string, agent: string): Promise<Pod> {
     const pod = this.assertIdle(id);

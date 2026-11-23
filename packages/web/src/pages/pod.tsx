@@ -1,12 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { ChevronLeft, GitBranch } from "lucide-react";
+import { ChevronLeft, ChevronRight, GitBranch } from "lucide-react";
 import { MachineDot, PodStateBadge } from "../components/status";
+import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
+import { AGENT_STATE } from "../lib/agent-state";
 import { apiText, usePods } from "../lib/api";
 import { timeAgo } from "../lib/utils";
-import { Agents, Services } from "./pods";
+import { Services } from "./pods";
 import { QueryError } from "./shared";
 
 /** One pod in full: what's wrong and what to do, its agents, repos and ports. */
@@ -81,10 +83,26 @@ export function PodPage() {
       )}
 
       {pod.state === "running" && (pod.agents ?? []).length > 0 && (
-        <Card className="flex flex-col gap-3 p-4">
+        <section className="flex flex-col gap-2">
           <h2 className="font-medium">Agents</h2>
-          <Agents pod={pod} />
-        </Card>
+          {(pod.agents ?? []).map((a) => {
+            const st = a.status ? AGENT_STATE[a.status.state] : undefined;
+            return (
+              <Link
+                key={a.id}
+                to="/pods/$id/agents/$agent"
+                params={{ id: pod.id, agent: a.id }}
+                className="block"
+              >
+                <Card className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2">
+                  <span className="min-w-0 flex-1 truncate font-medium">{a.label || a.id}</span>
+                  {st ? <Badge tone={st.tone}>{st.label}</Badge> : <Badge>Unknown</Badge>}
+                  <ChevronRight className="size-4 shrink-0 text-muted" />
+                </Card>
+              </Link>
+            );
+          })}
+        </section>
       )}
 
       {pod.repos.length > 0 && (

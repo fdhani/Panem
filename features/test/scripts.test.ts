@@ -155,6 +155,7 @@ describe("base: post-create", () => {
         id: "claude-code",
         label: "Claude Code",
         connect: [{ label: "Open in Claude", url: "https://claude.ai/code" }],
+        log: "~/.panem/remote-control.log",
         login: {
           label: "Sign in to Claude",
           command: "env -u CLAUDE_CODE_OAUTH_TOKEN claude auth login",

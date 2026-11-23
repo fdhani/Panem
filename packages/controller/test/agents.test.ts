@@ -191,3 +191,23 @@ describe("agent status and sign-in (agent-neutral)", () => {
     ]);
   });
 });
+
+test("an agent's own log is returned as it is (agent.json log)", async () => {
+  const ws = makeWorkspace();
+  const ctl = await makeController(ws);
+  ctl.backend.agentsJson = JSON.stringify([
+    { id: "claude-code", label: "Claude Code", connect: [], log: "~/.panem/remote-control.log" },
+    { id: "quiet", label: "Quiet", connect: [] },
+  ]);
+  const pod = await summon(ctl, "shop");
+  ctl.backend.writePodFile(
+    pod.id,
+    "~/.panem/remote-control.log",
+    "Error: Remote Control requires a full-scope login token.\n",
+  );
+  const res = await ctl.req("GET", `/api/pods/${pod.id}/agents/claude-code/log`);
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain("requires a full-scope login token");
+  expect((await ctl.req("GET", `/api/pods/${pod.id}/agents/quiet/log`)).status).toBe(404);
+  expect((await ctl.req("GET", `/api/pods/${pod.id}/agents/nope/log`)).status).toBe(404);
+});

@@ -121,6 +121,9 @@ export function createApp(d: ApiDeps): Hono {
     const pod = await service.retryExport(c.req.param("id"));
     return c.json(pod ?? null, 202);
   });
+  app.get("/api/pods/:id/agents/:agent/log", async (c) =>
+    c.text(await service.agentLog(c.req.param("id"), c.req.param("agent"))),
+  );
   app.post("/api/pods/:id/agents/:agent/restart", async (c) =>
     c.json(await service.restartAgent(c.req.param("id"), c.req.param("agent"))),
   );

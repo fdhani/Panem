@@ -51,6 +51,12 @@ export const AgentInfo = z.object({
   id: z.string(),
   label: z.string().default(""),
   connect: z.array(z.object({ label: z.string(), url: z.string().url() })).default([]),
+  /** The agent's own log, shown as it is on its page ("~/…" in the pod). */
+  log: z
+    .string()
+    .regex(/^~\/[A-Za-z0-9._/-]+$/)
+    .refine((p) => !p.includes(".."), "no ..")
+    .optional(),
   /** The agent's own sign-in, run with `panem pod login`; its files can be shared per machine. */
   login: z
     .object({
