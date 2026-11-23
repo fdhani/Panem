@@ -89,10 +89,13 @@ export function AgentPage() {
             </>
           ) : (
             <>
-              <p className="text-muted">One sign-in serves every pod on {where}.</p>
+              <p className="text-muted">
+                {a.label || a.id} signs in once per machine: this also signs in every other pod on{" "}
+                {where}.
+              </p>
               <div className="flex flex-wrap items-center gap-2">
                 <SignInButton scope={{ machine: pod.machine, agent: a.id, label: a.login.label }}>
-                  Sign in on {where}
+                  {a.login.label} on {where}
                 </SignInButton>
               </div>
             </>

@@ -22,11 +22,14 @@ export function SignInButton({
   children,
   variant = "primary",
   size = "sm",
+  title,
 }: {
   scope: LoginScope;
   children?: React.ReactNode;
   variant?: "primary" | "secondary" | "ghost";
   size?: "sm" | "md";
+  /** What the button signs in to, when its text alone doesn't say (tooltip). */
+  title?: string;
 }) {
   const [session, setSession] = useState<{ ticket: string; pod: string }>();
   const start = useMutation({ mutationFn: () => startLogin(scope), onSuccess: setSession });
@@ -37,9 +40,10 @@ export function SignInButton({
         size={size}
         disabled={start.isPending}
         aria-haspopup="dialog"
+        title={title}
         onClick={() => start.mutate()}
       >
-        <LogIn /> {children ?? "Sign in"}
+        <LogIn /> {children ?? scope.label}
       </Button>
       {start.error && (
         <p className="basis-full text-xs break-words text-bad">{start.error.message}</p>
