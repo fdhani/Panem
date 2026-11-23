@@ -2,6 +2,7 @@ import type { ForwarderStatus } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { AgentLogins } from "../components/agent-logins";
 import { MachineDot } from "../components/status";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -71,6 +72,7 @@ export function MachinesPage() {
                 {m.forwarder?.error && m.forwarder.status !== "running" && (
                   <p className="mt-1 text-xs break-words text-bad">{m.forwarder.error}</p>
                 )}
+                <AgentLogins machine={m} />
               </div>
               <Button
                 variant="ghost"

@@ -1,9 +1,11 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { ChevronLeft, RefreshCw, RotateCcw } from "lucide-react";
+import { SignInButton } from "../components/sign-in";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
+import { machineLabel } from "../lib/agent-login";
 import { AGENT_STATE } from "../lib/agent-state";
 import { api, apiText, keys, queryClient, usePods } from "../lib/api";
 import { timeAgo } from "../lib/utils";
@@ -51,6 +53,7 @@ export function AgentPage() {
     );
   }
   const st = a.status ? AGENT_STATE[a.status.state] : undefined;
+  const where = machineLabel(pod.machine);
 
   return (
     <div className="flex flex-col gap-4">
@@ -68,14 +71,39 @@ export function AgentPage() {
 
       {a.status?.message && <p className="text-sm break-words">{a.status.message}</p>}
 
-      {a.status?.state === "needs-login" && (
-        <Card className="flex flex-col gap-1 p-4 text-sm">
-          <h2 className="font-medium">{a.login?.label ?? "Sign in"}</h2>
-          <p className="text-muted">On the controller, run:</p>
-          <pre className="rounded-lg bg-surface-2 px-3 py-2 font-mono text-sm break-all whitespace-pre-wrap">
-            panem pod login {pod.id} {a.id}
-          </pre>
-          <p className="text-xs text-muted">One sign-in serves every pod on this machine.</p>
+      {a.status?.state === "needs-login" && a.login && (
+        <Card className="flex flex-col gap-2 p-4 text-sm">
+          <h2 className="font-medium">{a.login.label}</h2>
+          {a.login.shared === false ? (
+            <>
+              <p className="break-words text-warn">
+                This pod can't use {where}'s sign-in: {a.login.reason ?? "unknown reason"}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <SignInButton
+                  scope={{ machine: pod.machine, agent: a.id, label: a.login.label, pod: pod.id }}
+                >
+                  Sign in this pod only
+                </SignInButton>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-muted">One sign-in serves every pod on {where}.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <SignInButton scope={{ machine: pod.machine, agent: a.id, label: a.login.label }}>
+                  Sign in on {where}
+                </SignInButton>
+              </div>
+            </>
+          )}
+          <p className="text-xs text-muted">
+            Or on the controller:{" "}
+            <code className="font-mono break-all">
+              panem {a.login.shared === false ? `pod login ${pod.id}` : `machine login ${where}`}{" "}
+              {a.id}
+            </code>
+          </p>
         </Card>
       )}
 
