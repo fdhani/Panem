@@ -1,7 +1,17 @@
 import type { Job, Pod } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, ExternalLink, GitBranch, Play, Plus, Square, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  ChevronRight,
+  ExternalLink,
+  GitBranch,
+  Play,
+  Plus,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 import { type DeleteChoice, DeleteDialog } from "../components/delete-dialog";
 import { MachineDot, PodStateBadge } from "../components/status";
@@ -78,7 +88,13 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate font-mono text-[15px] font-medium">{pod.id}</p>
+          <Link
+            to="/pods/$id"
+            params={{ id: pod.id }}
+            className="block truncate font-mono text-[15px] font-medium hover:underline"
+          >
+            {pod.id}
+          </Link>
           <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
             <span>{pod.template}</span>
             <span aria-hidden>·</span>
@@ -116,22 +132,7 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
 
       {(pod.state === "running" || pod.services.length > 0) && <Services pod={pod} />}
 
-      {pod.error && (
-        <div className="rounded-lg bg-bad/10 px-3 py-2 text-sm text-bad">
-          <p className="break-words">{pod.error}</p>
-          {pod.errorLog?.length ? (
-            <details className="mt-1">
-              <summary className="cursor-pointer text-xs font-medium">Show log</summary>
-              <pre className="mt-2 max-h-72 overflow-auto rounded bg-surface px-2 py-1.5 font-mono text-[11px] leading-snug whitespace-pre text-text">
-                {pod.errorLog.join("\n")}
-              </pre>
-              <p className="mt-1 text-xs text-muted">
-                Full output: <span className="font-mono">GET /api/pods/{pod.id}/log</span>
-              </p>
-            </details>
-          ) : null}
-        </div>
-      )}
+      <PodIssues pod={pod} />
       {action.error && (
         <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">
           {action.error.message}
@@ -192,13 +193,51 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         busy={action.isPending}
         saveFailed={exportFailed}
       />
-      {pod.state === "running" && (pod.agents ?? []).length > 0 && <Agents pod={pod} />}
+
       {offline && (
         <p className="text-xs text-muted">
           Machine is offline. Deleting now skips its before-destroy hooks and memory.
         </p>
       )}
     </Card>
+  );
+}
+
+/** Problems worth a glance on the card; the pod's page has the details. */
+export function podIssues(pod: Pod): { tone: "warn" | "bad"; text: string }[] {
+  const out: { tone: "warn" | "bad"; text: string }[] = [];
+  if (pod.error)
+    out.push({ tone: "bad", text: pod.state === "error" ? "Something went wrong" : "Error" });
+  if (pod.state === "running") {
+    for (const a of pod.agents ?? []) {
+      if (a.status?.state === "needs-login")
+        out.push({ tone: "warn", text: `${a.label || a.id} needs sign-in` });
+      if (a.status?.state === "error")
+        out.push({ tone: "bad", text: `${a.label || a.id} stopped` });
+    }
+  }
+  return out;
+}
+
+/** A short line on the card when something needs attention, linking to the pod's page. */
+function PodIssues({ pod }: { pod: Pod }) {
+  const issues = podIssues(pod);
+  if (!issues.length) return null;
+  const bad = issues.some((i) => i.tone === "bad");
+  return (
+    <Link
+      to="/pods/$id"
+      params={{ id: pod.id }}
+      className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${bad ? "bg-bad/10 text-bad" : "bg-warn/10 text-warn"}`}
+    >
+      <AlertTriangle className="size-4 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">
+        {issues[0]!.text}
+        {issues.length > 1 && <span className="font-medium"> +{issues.length - 1}</span>}
+      </span>
+      <span className="shrink-0 font-medium">Details</span>
+      <ChevronRight className="size-4 shrink-0" />
+    </Link>
   );
 }
 
@@ -213,7 +252,7 @@ const AGENT_STATE: Record<string, { label: string; tone: "ok" | "warn" | "bad" |
  * Each agent's state, as it reports it (agent_status in the pod), with what to do next. Generic:
  * any agent Feature that follows the contract shows up the same way.
  */
-function Agents({ pod }: { pod: Pod }) {
+export function Agents({ pod }: { pod: Pod }) {
   const retry = useMutation({
     mutationFn: (agent: string) => api("POST", `/api/pods/${pod.id}/agents/${agent}/restart`),
     onSettled: () => queryClient.invalidateQueries({ queryKey: keys.pods }),
@@ -260,7 +299,7 @@ function Agents({ pod }: { pod: Pod }) {
   );
 }
 
-function Services({ pod }: { pod: Pod }) {
+export function Services({ pod }: { pod: Pod }) {
   const running = pod.state === "running";
   const [adding, setAdding] = useState("");
   const toggle = useMutation({

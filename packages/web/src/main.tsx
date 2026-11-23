@@ -13,6 +13,7 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import { type LiveStatus, queryClient, useLiveEvents } from "./lib/api";
 import { MachinesPage } from "./pages/machines";
+import { PodPage } from "./pages/pod";
 import { PodsPage } from "./pages/pods";
 import { SettingsPage } from "./pages/settings";
 import { SummonPage } from "./pages/summon";
@@ -88,6 +89,7 @@ function Layout() {
 const root = createRootRoute({ component: Layout });
 const routeTree = root.addChildren([
   createRoute({ getParentRoute: () => root, path: "/", component: PodsPage }),
+  createRoute({ getParentRoute: () => root, path: "/pods/$id", component: PodPage }),
   createRoute({ getParentRoute: () => root, path: "/summon", component: SummonPage }),
   createRoute({ getParentRoute: () => root, path: "/machines", component: MachinesPage }),
   createRoute({ getParentRoute: () => root, path: "/settings", component: SettingsPage }),
