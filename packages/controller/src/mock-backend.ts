@@ -15,6 +15,7 @@ import {
   claudeProjectDir,
   repoPath,
 } from "@panem/core";
+import { shq } from "./shell";
 
 interface MockPod {
   id: string;
@@ -37,6 +38,11 @@ export class MockBackend implements PodBackend {
   machinesList: BackendMachine[] = [];
   delayMs = 0;
   failNext: Partial<Record<Op, string>> = {};
+  /**
+   * Stands in for each machine's sign-in volume: <loginsDir>/<machine>/<agent> exists once the
+   * agent was signed in there (by interactiveArgv's mock sign-in).
+   */
+  readonly loginsDir = mkdtempSync(join(tmpdir(), "panem-mock-logins-"));
   /** What happened, in order: "up:<id>", "upload:<id>", "hook:start:<id>", ... */
   events: string[] = [];
   /** What setup writes to ~/.panem/agents.json (undefined: none, like an older Feature). */
@@ -115,6 +121,10 @@ export class MockBackend implements PodBackend {
     writeFileSync(join(this.home(o.id), ".panem/pod.json"), o.env.PANEM_POD ?? "{}");
     if (this.agentsJson !== undefined) {
       writeFileSync(join(this.home(o.id), ".panem/agents.json"), this.agentsJson);
+      // Agents already signed in on this machine start signed in, as with the shared volume.
+      for (const a of JSON.parse(this.agentsJson) as { id: string; login?: unknown }[]) {
+        if (a.login && this.isSignedIn(o.machine, a.id)) this.markRunning(o.id, a.id);
+      }
     }
     this.events.push(`up:${o.id}`);
   }
@@ -170,6 +180,13 @@ export class MockBackend implements PodBackend {
 
   async exec(id: string, command: string, opts?: { sshAuthSock?: string }): Promise<ExecResult> {
     await this.step("exec");
+    // Restarting one agent (after a sign-in): it runs if its machine is signed in.
+    const only = command.match(/^PANEM_ONLY_AGENT=([A-Za-z0-9_-]+) /)?.[1];
+    if (only) {
+      this.events.push(`restart:${only}:${id}`);
+      if (this.isSignedIn(this.pod(id).machine, only)) this.markRunning(id, only);
+      return { exitCode: 0, stdout: new Uint8Array(), stderr: "" };
+    }
     this.execAgents.push({
       id,
       kind: command.includes("panem-before-destroy") ? "before-destroy" : "other",
@@ -184,6 +201,35 @@ export class MockBackend implements PodBackend {
     await this.step("upload");
     this.events.push(`upload:${id}`);
     return this.run(id, command, data);
+  }
+
+  isSignedIn(machine: string, agent: string): boolean {
+    return existsSync(join(this.loginsDir, machine, agent));
+  }
+
+  private markRunning(id: string, agent: string) {
+    const dir = join(this.home(id), ".panem/agents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${agent}.status.json`),
+      JSON.stringify({ id: agent, state: "running", message: "", at: new Date().toISOString() }),
+    );
+    writeFileSync(join(dir, `${agent}.login.json`), JSON.stringify({ shared: true }));
+  }
+
+  /**
+   * A stand-in sign-in: prints a link, asks for a code, and on any non-empty code marks the
+   * agent signed in on the pod's machine. Exits 1 without one.
+   */
+  interactiveArgv(id: string, command: string): { argv: string[]; env: Record<string, string> } {
+    const agent = command.trim().split(/\s+/).at(-1) ?? "";
+    const mark = join(this.loginsDir, this.pod(id).machine, agent);
+    const script = [
+      `printf 'Mock sign-in for %s in %s\\r\\nOpen https://example.com/mock-login and paste the code.\\r\\nCode: ' ${shq(agent)} ${shq(id)}`,
+      "IFS= read -r code",
+      `if [ -n "$code" ]; then mkdir -p ${shq(dirname(mark))} && touch ${shq(mark)} && printf 'Signed in.\\r\\n'; else printf 'No code entered.\\r\\n'; exit 1; fi`,
+    ].join("; ");
+    return { argv: ["bash", "-c", script], env: {} };
   }
 
   async runHook(id: string, hook: "start") {

@@ -34,6 +34,8 @@ function safeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+const LoginRequest = z.object({ pod: z.string().optional() });
+
 async function body<T extends z.ZodTypeAny>(req: Request, schema: T): Promise<z.infer<T>> {
   let raw: unknown;
   try {
@@ -97,6 +99,19 @@ export function createApp(d: ApiDeps): Hono {
   app.post("/api/machines/:name/repair", async (c) =>
     c.json(await service.repairMachine(c.req.param("name"))),
   );
+
+  // An agent's sign-in on a machine (any agent whose agent.json has "login"). The first returns
+  // a one-time ticket for the terminal's WebSocket (LOGIN_WS_PATH); /done is for sign-ins run
+  // elsewhere (the CLI) and restarts the agent where it waits for one.
+  app.post("/api/machines/:name/logins/:agent", async (c) => {
+    const { pod } = await body(c.req.raw, LoginRequest);
+    return c.json(service.startLogin(c.req.param("name"), c.req.param("agent"), pod), 201);
+  });
+  app.post("/api/machines/:name/logins/:agent/done", async (c) => {
+    const { pod } = await body(c.req.raw, LoginRequest);
+    const t = service.loginTarget(c.req.param("name"), c.req.param("agent"), pod);
+    return c.json(await service.signedIn(t.machine, t.agent, t.pod));
+  });
 
   app.get("/api/workspace", async (c) => c.json({ dir: await d.workspace.current() }));
   app.get("/api/templates/:name/git-check", async (c) =>

@@ -12,6 +12,8 @@ import {
   configPath,
   dataDir,
   loadConfig,
+  machineLogins,
+  pickLoginPod,
   removeCredential,
   saveConfig,
   setCredential,
@@ -321,6 +323,41 @@ const machine = defineCommand({
         console.log(`forwarder ${st.status}`);
       },
     }),
+    login: defineCommand({
+      meta: {
+        name: "login",
+        description:
+          "Sign an agent in on a machine, in this terminal (run on the controller): one sign-in serves every pod there",
+      },
+      args: {
+        name: { type: "positional", required: true },
+        agent: {
+          type: "positional",
+          required: false,
+          description: "Agent id (default: the first one waiting for a sign-in)",
+        },
+      },
+      async run({ args }) {
+        const c = await client();
+        const raw = String(args.name);
+        const name = raw.startsWith("m-") ? raw : `m-${raw}`;
+        const pods = await c.call<Pod[]>("GET", "/api/pods");
+        const logins = machineLogins(name, pods);
+        const login = args.agent
+          ? logins.find((l) => l.agent === args.agent)
+          : (logins.find((l) => l.state === "needs-sign-in") ?? logins[0]);
+        if (!login) {
+          throw new Error(
+            args.agent
+              ? `no pod on ${raw} has an agent ${args.agent} with a sign-in`
+              : `no pod on ${raw} has an agent with a sign-in`,
+          );
+        }
+        const pod = pickLoginPod(name, login.agent, pods);
+        if (!pod) throw new Error(`no running pod on ${raw} has ${login.agent}; summon one first`);
+        await signInHere(c, { machine: name, agent: login.agent, pod, label: login.loginLabel });
+      },
+    }),
     rm: defineCommand({
       meta: { name: "rm", description: "Remove a machine" },
       args: { name: { type: "positional", required: true } },
@@ -334,6 +371,44 @@ const machine = defineCommand({
     }),
   },
 });
+
+/**
+ * Run an agent's own sign-in in this terminal, in a pod (over DevPod, so on the controller), then
+ * let the controller restart the agent wherever it waits for a sign-in on that machine. The
+ * same flow as the web UI's Sign in, for any agent with a "login" block.
+ */
+async function signInHere(
+  c: Awaited<ReturnType<typeof client>>,
+  t: { machine: string; agent: string; pod: string; label?: string },
+) {
+  const cfg = await loadConfig().catch(() => undefined);
+  if (!cfg) {
+    throw new Error(
+      "run this on the controller (it uses DevPod there), or use Sign in on the Machines page of the web UI",
+    );
+  }
+  console.log(
+    `${t.label ?? "Sign in"} (${t.agent}) on ${t.machine.replace(/^m-/, "")}, in ${t.pod}. Follow the steps below; the sign-in is yours, Panem never sees it.\n`,
+  );
+  const proc = Bun.spawn(
+    [
+      cfg.devpodPath,
+      "ssh",
+      t.pod,
+      "--start-services=false",
+      "--command",
+      `/usr/local/share/panem/agent-login.sh ${t.agent}`,
+    ],
+    { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, SSH_AUTH_SOCK: "" } },
+  );
+  if ((await proc.exited) !== 0) throw new Error("sign-in didn't finish");
+  const r = await c.call<{ restarted: string[] }>(
+    "POST",
+    `/api/machines/${encodeURIComponent(t.machine)}/logins/${encodeURIComponent(t.agent)}/done`,
+    { pod: t.pod },
+  );
+  console.log(`Signed in. ${t.agent} restarted in: ${r.restarted.join(", ")}`);
+}
 
 const podId = { id: { type: "positional", required: true } } as const;
 
@@ -417,10 +492,6 @@ const pod = defineCommand({
           required: false,
           description: "Agent id (default: the first one with a sign-in)",
         },
-        all: {
-          type: "boolean",
-          description: "Then restart the agent in the machine's other running pods too",
-        },
       },
       async run({ args }) {
         const c = await client();
@@ -435,53 +506,12 @@ const pod = defineCommand({
               : `no agent in pod ${id} has a sign-in`,
           );
         }
-        // DevPod lives on the controller: this has to run there.
-        const cfg = await loadConfig().catch(() => undefined);
-        if (!cfg) {
-          throw new Error(
-            `run this on the controller (it uses DevPod there): ssh -t <controller> panem pod login ${id}`,
-          );
-        }
-        console.log(
-          `${agent.login?.label ?? "Sign in"} (${agent.id}) in ${id}. Follow the steps below; the sign-in is yours, Panem never sees it.\n`,
-        );
-        const proc = Bun.spawn(
-          [
-            cfg.devpodPath,
-            "ssh",
-            id,
-            "--start-services=false",
-            "--command",
-            `/usr/local/share/panem/agent-login.sh ${agent.id}`,
-          ],
-          { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, SSH_AUTH_SOCK: "" } },
-        );
-        if ((await proc.exited) !== 0) throw new Error("sign-in didn't finish");
-        const restart = async (pid: string) => {
-          const r = await c.call<Pod>(
-            "POST",
-            `/api/pods/${encodeURIComponent(pid)}/agents/${agent.id}/restart`,
-          );
-          const st = r.agents?.find((a) => a.id === agent.id)?.status;
-          console.log(
-            `${pid}: ${agent.id} ${st?.state ?? "restarted"}${st?.message ? ` (${st.message})` : ""}`,
-          );
-        };
-        await restart(id);
-        if (args.all) {
-          const others = (await c.call<Pod[]>("GET", "/api/pods")).filter(
-            (o) =>
-              o.id !== id &&
-              o.machine === p.machine &&
-              o.state === "running" &&
-              o.agents?.some((a) => a.id === agent.id),
-          );
-          for (const o of others) await restart(o.id);
-        } else {
-          console.log(
-            `Other pods on ${p.machine.replace(/^m-/, "")} use this sign-in from their next start (or run again with --all).`,
-          );
-        }
+        await signInHere(c, {
+          machine: p.machine,
+          agent: agent.id,
+          pod: id,
+          label: agent.login?.label,
+        });
       },
     }),
     rm: defineCommand({

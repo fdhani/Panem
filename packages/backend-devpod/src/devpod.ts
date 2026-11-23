@@ -330,6 +330,13 @@ export class DevPodBackend implements PodBackend {
     await this.lifecycle(id, "start");
   }
 
+  interactiveArgv(id: string, command: string): { argv: string[]; env: Record<string, string> } {
+    return {
+      argv: [this.bin, "ssh", id, ...SSH_FLAGS, "--command", command],
+      env: { ...this.env, SSH_AUTH_SOCK: "" },
+    };
+  }
+
   async stop(id: string): Promise<void> {
     await this.run(["stop", id], 5 * 60_000);
   }
