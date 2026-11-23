@@ -11,6 +11,13 @@ export interface BackendMachine {
   user?: string;
 }
 
+/**
+ * Runs `fn` while the pod's source folder is held: nothing else writes to it, and no other
+ * build reads it, until `fn` settles. DevPod builds straight from the folder on the local
+ * machine, so a write (or another build) mid-build can break it.
+ */
+export type FolderLock = <T>(fn: () => Promise<T>) => Promise<T>;
+
 export interface UpOptions {
   id: string;
   machine: string;
@@ -27,6 +34,8 @@ export interface UpOptions {
   files?: PodFile[];
   /** An ssh-agent socket on the controller to forward into the setup session (git over SSH). */
   sshAuthSock?: string;
+  /** Held while DevPod reads the source folder (the build), not during setup. */
+  withFolder?: FolderLock;
 }
 
 export interface PodFile {
@@ -50,7 +59,7 @@ export interface ExecResult {
 export interface PodBackend {
   up(opts: UpOptions): Promise<void>;
   list(): Promise<BackendPod[]>;
-  start(id: string): Promise<void>;
+  start(id: string, opts?: { withFolder?: FolderLock }): Promise<void>;
   stop(id: string): Promise<void>;
   delete(id: string, opts?: { force?: boolean }): Promise<void>;
   exec(id: string, command: string, opts?: { sshAuthSock?: string }): Promise<ExecResult>;

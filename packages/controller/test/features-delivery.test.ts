@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Pod } from "@panem/core";
 import { panemFeatures, readFeatures } from "../src/machine-assets";
@@ -54,6 +54,21 @@ describe("Panem's Features are delivered with the workspace (no registry)", () =
     expect(fixed.written).toBe(1);
     expect(readFileSync(join(dir, "claude-code/install.sh"), "utf8")).not.toBe("tampered\n");
     expect(existsSync(join(dir, "claude-code/left-from-an-old-version.sh"))).toBe(false);
+  });
+
+  test("cleanup leaves the generated config and a build in progress alone", async () => {
+    const ws = makeWorkspace();
+    const ctl = await makeController(ws);
+    const path = "templates/shop/.devcontainer/devcontainer.json";
+    await ctl.workspace.installFeatures(path);
+    const dir = join(ws.dir, "templates/shop/.devcontainer/panem-features");
+    // What another pod's `devpod up` has in this folder mid-build.
+    mkdirSync(join(dir, ".devpod-internal/0-panem"), { recursive: true });
+    writeFileSync(join(dir, ".devpod-internal/0-panem/install.sh"), "building\n");
+    writeFileSync(join(dir, "devcontainer.json"), "{}");
+    await ctl.workspace.installFeatures(path);
+    expect(existsSync(join(dir, ".devpod-internal/0-panem/install.sh"))).toBe(true);
+    expect(existsSync(join(dir, "devcontainer.json"))).toBe(true);
   });
 
   test("a git-backed workspace stays clean", async () => {

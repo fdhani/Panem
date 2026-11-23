@@ -1,0 +1,78 @@
+05:27:20 debug Use docker environment variables: []
+05:27:20 info Workspace omni-hkogdw is using local folder /home/me/panem-workspace
+05:27:21 debug Inject and run command: '/usr/local/bin/devpod' agent workspace up --workspace-info '***'
+05:27:22 info Build image
+05:27:22 debug Running docker command: docker buildx build --load -f /tmp/devpod-build-123/Dockerfile-with-features -t vsc-omni-hkogdw-f2b1:devpod-6c1e /home/me/panem-workspace/templates/omni/.devcontainer/panem-features
+05:27:23 info #0 building with "default" instance using docker driver
+05:27:23 info #1 [internal] load build definition from Dockerfile-with-features
+05:27:23 info #1 transferring dockerfile: 2.10kB done
+05:27:23 info #1 DONE 0.0s
+05:27:24 info #6 [internal] load build context
+05:27:24 info #6 transferring context: 41.3kB done
+05:27:24 info #6 DONE 0.1s
+05:27:24 info #7 [dev_containers_target_stage 2/4] COPY ./.devpod-internal/ /tmp/build-features/
+05:27:24 info #7 ERROR: failed to calculate checksum of ref 1c2d::q9x: "/.devpod-internal": not found
+05:27:24 info ------
+05:27:24 info  > [dev_containers_target_stage 2/4] COPY ./.devpod-internal/ /tmp/build-features/:
+05:27:24 info ------
+05:27:24 info ERROR: failed to solve: failed to compute cache key: failed to calculate checksum of ref 1c2d::q9x: "/.devpod-internal": not found
+05:27:24 debug Connection to SSH Server closed
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step0
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:100
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:80 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step1
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:107
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:81 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step2
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:114
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:82 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step3
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:121
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:83 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step4
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:128
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:84 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step5
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:135
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:85 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step6
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:142
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:86 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step7
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:149
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:87 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step8
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:156
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:88 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step9
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:163
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:89 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step10
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:170
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:90 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step11
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:177
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:91 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step12
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:184
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:92 +0x1a5
+05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).step13
+05:27:35 info 	/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:191
+05:27:35 info github.com/loft-sh/devpod/cmd/agent/workspace.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})
+05:27:35 info 	/home/runner/work/devpod/devpod/cmd/agent/workspace/up.go:93 +0x1a5
+05:27:35 info runtime.goexit
+05:27:35 info 	/opt/hostedtoolcache/go/1.22.5/x64/src/runtime/asm_amd64.s:1695
+05:27:35 fatal Process exited with status 1

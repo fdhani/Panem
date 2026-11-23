@@ -5,7 +5,7 @@ import {
   type ForwarderState,
   PANEM_VERSION,
 } from "@panem/core";
-import { BUN_IMAGE, ForwarderManager, type Forwarders } from "../src/forwarders";
+import { BUN_IMAGE, ForwarderManager, type Forwarders, dockerError } from "../src/forwarders";
 import { forwarderBundle, shortHash } from "../src/machine-assets";
 import { parseTailscaleIPs } from "../src/probe";
 import type { MachineShell, ShellResult } from "../src/shell";
@@ -119,10 +119,55 @@ describe("ForwarderManager", () => {
     const none = new FakeShell();
     none.replies.push(
       [/docker inspect/, { code: 1 }],
-      [/docker pull/, { code: 1, stderr: "x\nmanifest unknown" }],
+      [
+        /docker pull/,
+        {
+          code: 1,
+          stderr: "Using default tag: latest\nError response from daemon: manifest unknown",
+        },
+      ],
       [/docker image inspect/, { code: 1 }],
     );
     await expect(mgr(none).ensure(vps)).rejects.toThrow("manifest unknown");
+  });
+
+  test("two deploys of one machine at once: the second joins the first", async () => {
+    const shell = new FakeShell();
+    shell.replies.push(
+      [/docker inspect/, { code: 1, stderr: "No such object" }],
+      [/^sh -c/, { stdout: "/home/dev/.panem-forwarder\n" }],
+    );
+    const m = mgr(shell);
+    const [a, b] = await Promise.all([m.ensure(vps), m.ensure(vps)]);
+    expect(a).toEqual(b);
+    expect(shell.cmds().filter((c) => c === "docker run")).toHaveLength(1);
+    expect(shell.cmds().filter((c) => c === "docker rm")).toHaveLength(1);
+    // Once it's done, a later repair checks again.
+    await m.ensure(vps);
+    expect(shell.cmds().filter((c) => c === "docker inspect")).toHaveLength(2);
+  });
+
+  test("a failed docker run reports Docker's error, not its usage footer", async () => {
+    const shell = new FakeShell();
+    shell.replies.push(
+      [/docker inspect/, { code: 1, stderr: "No such object" }],
+      [/^sh -c/, { stdout: "/home/dev/.panem-forwarder\n" }],
+      [
+        /docker run/,
+        {
+          code: 125,
+          stderr:
+            'docker: Error response from daemon: Conflict. The container name "/panem-forwarder" is already in use by container "4f1c".\nSee \'docker run --help\'.\n',
+        },
+      ],
+    );
+    await expect(mgr(shell).ensure(vps)).rejects.toThrow(
+      'docker run: docker: Error response from daemon: Conflict. The container name "/panem-forwarder" is already in use',
+    );
+    expect(dockerError("Run 'docker run --help' for more information\n")).toBe(
+      "Run 'docker run --help' for more information",
+    );
+    expect(dockerError("")).toBe("failed");
   });
 
   test("a failed copy of the forwarder's code is reported", async () => {

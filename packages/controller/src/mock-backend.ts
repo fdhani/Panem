@@ -6,6 +6,7 @@ import {
   type BackendMachine,
   type BackendPod,
   type ExecResult,
+  type FolderLock,
   type ForwarderState,
   type ForwarderStatus,
   PANEM_VERSION,
@@ -87,7 +88,8 @@ export class MockBackend implements PodBackend {
 
   async up(o: UpOptions) {
     this.lastUp = o;
-    await this.step("up");
+    // The build is the part that reads the workspace folder.
+    await (o.withFolder ?? ((f) => f()))(() => this.step("up"));
     if (!this.machinesList.some((m) => m.name === o.machine)) {
       throw new BackendError(`provider ${o.machine} not found`);
     }
@@ -121,8 +123,8 @@ export class MockBackend implements PodBackend {
     return [...this.pods.values()].map((p) => ({ id: p.id, machine: p.machine, status: p.status }));
   }
 
-  async start(id: string) {
-    await this.step("start");
+  async start(id: string, opts: { withFolder?: FolderLock } = {}) {
+    await (opts.withFolder ?? ((f) => f()))(() => this.step("start"));
     this.pod(id).status = "running";
     this.events.push(`start:${id}`);
   }

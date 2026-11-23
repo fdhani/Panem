@@ -68,7 +68,7 @@ export function PodPage() {
           ) : null}
           <div>
             <Button size="sm" disabled={log.isFetching} onClick={() => log.refetch()}>
-              {log.isFetching ? "Loading…" : "Full devpod output"}
+              {log.isFetching ? "Loading…" : "Show the full log"}
             </Button>
           </div>
           {log.data !== undefined &&

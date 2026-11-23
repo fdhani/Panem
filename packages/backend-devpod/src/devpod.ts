@@ -15,6 +15,7 @@ import type {
   BackendMachine,
   BackendPod,
   ExecResult,
+  FolderLock,
   PodBackend,
   PodFile,
   UpOptions,
@@ -88,6 +89,7 @@ export interface DevPodOptions {
   env?: Record<string, string>;
   upTimeoutMs?: number;
   statusTimeoutMs?: number;
+  log?: (msg: string) => void;
 }
 
 export class DevPodBackend implements PodBackend {
@@ -96,9 +98,11 @@ export class DevPodBackend implements PodBackend {
   private readonly upTimeoutMs: number;
   private readonly statusTimeoutMs: number;
   private readonly logDir?: string;
+  private readonly log_: (msg: string) => void;
 
   constructor(opts: DevPodOptions = {}) {
     this.logDir = opts.logDir;
+    this.log_ = opts.log ?? ((m) => console.log(`[panem] ${m}`));
     this.bin = opts.bin ?? "devpod";
     this.env = { DEVPOD_DISABLE_TELEMETRY: "true", ...opts.env };
     this.upTimeoutMs = opts.upTimeoutMs ?? 30 * 60_000;
@@ -155,38 +159,52 @@ export class DevPodBackend implements PodBackend {
       // Local folders (tests, single-machine setups) take no @branch suffix.
       const local = /^(\/|\.\/|\.\.\/)/.test(o.source);
       const source = o.sourceRef && !local ? `${o.source}@${o.sourceRef}` : o.source;
-      const res = await this.run(
-        [
-          "up",
-          source,
-          "--id",
-          o.id,
-          "--provider",
-          o.machine,
-          "--ide",
-          "none",
-          "--open-ide=false",
-          "--devcontainer-path",
-          o.devcontainerPath,
-          "--workspace-env-file",
-          envFile,
-          // Verbose output costs nothing unless something fails, and then it's what we need.
-          "--debug",
-        ],
-        this.upTimeoutMs,
-        false,
-      );
-      const out = clean(`${text(res.stdout)}\n${res.stderr}`, Object.values(o.env));
-      await this.saveLog(o.id, "devpod up", out);
-      if (res.exitCode !== 0) {
-        const err = new BackendError(
-          `devpod up failed: ${lastMeaningful(out)}`,
-          res.stderr,
-          res.exitCode,
-        );
-        err.detail = tail(out, 60);
-        throw err;
-      }
+      const args = [
+        "up",
+        source,
+        "--id",
+        o.id,
+        "--provider",
+        o.machine,
+        "--ide",
+        "none",
+        "--open-ide=false",
+        "--devcontainer-path",
+        o.devcontainerPath,
+        "--workspace-env-file",
+        envFile,
+        // Verbose output costs nothing unless something fails, and then it's what we need.
+        "--debug",
+      ];
+      const secrets = Object.values(o.env);
+      const hold: FolderLock = o.withFolder ?? ((f) => f());
+      await hold(async () => {
+        let res = await this.run(args, this.upTimeoutMs, false);
+        let out = clean(`${text(res.stdout)}\n${res.stderr}`, secrets);
+        await this.saveLog(o.id, "devpod up", out);
+        // A build that fails before any container exists is retried once: it has failed
+        // intermittently (e.g. right after a delete) and passed when run again.
+        if (res.exitCode !== 0 && (await this.status(o.id)) === "notfound") {
+          this.log_(`${o.id}: devpod up failed before creating a container; retrying once`);
+          res = await this.run(args, this.upTimeoutMs, false);
+          out = clean(`${text(res.stdout)}\n${res.stderr}`, secrets);
+          await this.saveLog(
+            o.id,
+            "devpod up (retry: the first attempt failed before creating a container)",
+            out,
+            true,
+          );
+        }
+        if (res.exitCode !== 0) {
+          const err = new BackendError(
+            `devpod up failed: ${headline(out)}`,
+            res.stderr,
+            res.exitCode,
+          );
+          err.detail = excerpt(out);
+          throw err;
+        }
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -250,7 +268,7 @@ export class DevPodBackend implements PodBackend {
         r.stderr,
         r.exitCode,
       );
-      err.detail = tail(out, 60);
+      err.detail = excerpt(out);
       throw err;
     }
   }
@@ -304,9 +322,11 @@ export class DevPodBackend implements PodBackend {
     }
   }
 
-  async start(id: string): Promise<void> {
-    // `devpod up <id>` starts a stopped workspace; `devpod ssh` does not.
-    await this.run(["up", id, "--ide", "none", "--open-ide=false"], this.upTimeoutMs);
+  async start(id: string, opts: { withFolder?: FolderLock } = {}): Promise<void> {
+    // `devpod up <id>` starts a stopped workspace; `devpod ssh` does not. It also reads the
+    // source folder (and clears DevPod's build files there), so it holds the folder too.
+    const hold: FolderLock = opts.withFolder ?? ((f) => f());
+    await hold(() => this.run(["up", id, "--ide", "none", "--open-ide=false"], this.upTimeoutMs));
     await this.lifecycle(id, "start");
   }
 
@@ -425,7 +445,7 @@ export function failureSummary(out: string): string {
 }
 
 /** Saved `devpod up` logs kept per controller (newest first). */
-export const KEEP_LOGS = 20;
+export const KEEP_LOGS = 50;
 
 /**
  * Output made readable and safe to keep: terminal escape codes and carriage-return redraws
@@ -452,11 +472,77 @@ export function tail(s: string, n: number): string[] {
     .slice(-n);
 }
 
-/** The most useful single line: the last error-looking one, else the last line. */
-function lastMeaningful(out: string): string {
-  const lines = tail(out, 200);
-  const err = [...lines].reverse().find((l) => /\b(error|fatal|failed)\b/i.test(l));
-  return (err ?? lines.at(-1) ?? "unknown error").trim();
+/** DevPod's line prefix: an optional time, then a level ("05:27:35 info ..."). */
+const PREFIX = /^(?:\d\d:\d\d:\d\d\s+)?(?:(debug|info|warn|error|fatal|done)\s+)?/;
+
+function split(line: string): { level?: string; text: string } {
+  const m = line.match(PREFIX)!;
+  return { level: m[1], text: line.slice(m[0].length).trim() };
+}
+
+/**
+ * A Go stack-trace line, as DevPod prints them after a failure: a function
+ * ("github.com/loft-sh/devpod/pkg/x.(*runner).Up", "main.main()", "runtime.goexit") or a
+ * source position ("/home/runner/work/devpod/x.go:123 +0x1a", or a .s file), or "goroutine 1 [running]:".
+ */
+export function isStackFrame(line: string): boolean {
+  const t = split(line).text;
+  if (!t) return false;
+  if (/^\/\S+\.(go|s):\d+(\s+\+0x[0-9a-f]+)?$/.test(t)) return true;
+  if (/^goroutine \d+ \[/.test(t)) return true;
+  if (/^(github\.com|golang\.org|gopkg\.in|k8s\.io|google\.golang\.org)\/[^\s(]+(\(.*\))?$/.test(t))
+    return true;
+  if (/^(main|runtime|sync|os\/exec|net\/http)\.[\w.()*]+(\(.*\))?$/.test(t)) return true;
+  return /^[\w./-]+\.\(\*?\w+\)\.\w+(\(.*\))?$/.test(t);
+}
+
+/** "Process exited with status 1": says that something failed, not what. */
+const GENERIC = /(Process exited with status \d+|exit status \d+)$/;
+
+/**
+ * The first line that says why something failed: a BuildKit error ("#8 ERROR: ...",
+ * "ERROR: failed to solve: ..."), an error or fatal line, or "Error: ...". Debug lines, stack
+ * frames and the generic "Process exited with status N" don't count.
+ */
+export function firstError(lines: string[]): number {
+  return lines.findIndex((l) => {
+    if (isStackFrame(l)) return false;
+    const { level, text } = split(l);
+    if (level === "debug" || GENERIC.test(text)) return false;
+    return (
+      /(^#\d+ .*)?\bERROR:/.test(text) ||
+      level === "error" ||
+      level === "fatal" ||
+      /^(Error|error):/.test(text)
+    );
+  });
+}
+
+/**
+ * The lines to keep with a failed pod: stack frames dropped, the first error with what led to
+ * it and what followed, then the end of the output. The whole output is in the saved log.
+ */
+export function excerpt(out: string, before = 8, after = 30, end = 30): string[] {
+  const lines = out.split("\n").filter((l) => l.trim() && !isStackFrame(l));
+  const i = firstError(lines);
+  if (i < 0) return lines.slice(-end);
+  const from = Math.max(0, i - before);
+  const to = i + after + 1;
+  if (to >= lines.length - end) return lines.slice(from).slice(0, before + after + 1 + end);
+  return [...lines.slice(from, to), "…", ...lines.slice(-end)];
+}
+
+/** The one line for the pod's error: the first real error, else the last error-looking line. */
+export function headline(out: string): string {
+  const lines = out.split("\n").filter((l) => l.trim() && !isStackFrame(l));
+  const i = firstError(lines);
+  const line =
+    i >= 0
+      ? lines[i]!
+      : ([...lines].reverse().find((l) => /\b(error|fatal|failed)\b/i.test(l)) ??
+        lines.at(-1) ??
+        "unknown error");
+  return line.replace(/^\d\d:\d\d:\d\d\s+/, "").trim();
 }
 
 // ---- parsers (exported for tests; DevPod JSON shapes are not a stable API) ----

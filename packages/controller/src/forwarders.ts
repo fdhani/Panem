@@ -50,6 +50,8 @@ export class ForwarderManager implements Forwarders {
   /** A prebuilt forwarder image (config.forwarder.image), or undefined to run the bundle. */
   private readonly customImage?: string;
   private readonly addrCache = new Map<string, string>();
+  /** Deploys in progress, per machine: a second request joins the first. */
+  private readonly deploying = new Map<string, Promise<ForwarderStatus>>();
 
   constructor(
     private readonly cfg: Config,
@@ -185,6 +187,16 @@ export class ForwarderManager implements Forwarders {
    */
   async ensure(m: MachineRef): Promise<ForwarderStatus> {
     if (!this.enabled) return { status: "disabled" };
+    // One deploy per machine at a time: two at once would remove each other's container (a
+    // restart's automatic redeploy and a manual repair, say).
+    const running = this.deploying.get(m.name);
+    if (running) return running;
+    const p = this.deploy(m).finally(() => this.deploying.delete(m.name));
+    this.deploying.set(m.name, p);
+    return p;
+  }
+
+  private async deploy(m: MachineRef): Promise<ForwarderStatus> {
     const address = await this.address(m);
     const code = this.customImage ? undefined : await forwarderBundle();
     const hash = code === undefined ? "" : shortHash(code);
@@ -211,7 +223,7 @@ export class ForwarderManager implements Forwarders {
     if (pull.code !== 0) {
       // A local image is fine (dev, CI, offline machines); otherwise surface the pull error.
       const local = await this.shell.run(m, ["docker", "image", "inspect", image]);
-      if (local.code !== 0) throw new Error(`docker pull ${image}: ${lastLine(pull.stderr)}`);
+      if (local.code !== 0) throw new Error(`docker pull ${image}: ${dockerError(pull.stderr)}`);
     }
     let bundle: { dir: string; file: string; hash: string } | undefined;
     if (code !== undefined) {
@@ -228,13 +240,13 @@ export class ForwarderManager implements Forwarders {
       );
       const dir = put.stdout.trim().split("\n").at(-1) ?? "";
       if (put.code !== 0 || !dir.startsWith("/")) {
-        throw new Error(`copying the forwarder to ${m.host}: ${lastLine(put.stderr)}`);
+        throw new Error(`copying the forwarder to ${m.host}: ${dockerError(put.stderr)}`);
       }
       bundle = { dir, file, hash };
     }
     const { argv, env } = this.runArgs(address, bundle);
     const run = await this.shell.run(m, argv, { stdin: env });
-    if (run.code !== 0) throw new Error(`docker run: ${lastLine(run.stderr)}`);
+    if (run.code !== 0) throw new Error(`docker run: ${dockerError(run.stderr)}`);
     return { status: "running", version: PANEM_VERSION, address };
   }
 
@@ -244,6 +256,16 @@ export class ForwarderManager implements Forwarders {
   }
 }
 
-function lastLine(s: string): string {
-  return s.trim().split("\n").filter(Boolean).at(-1) ?? "failed";
+/**
+ * The line of a docker command's stderr that says what went wrong: the first that mentions an
+ * error, else the first that isn't the usage footer ("See 'docker run --help'.").
+ */
+export function dockerError(stderr: string): string {
+  const lines = stderr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const footer = /^(See '.*--help'\.?|Run '.*--help' for more information\.?)$/;
+  const useful = lines.filter((l) => !footer.test(l));
+  return useful.find((l) => /error/i.test(l)) ?? useful[0] ?? lines.at(-1) ?? "failed";
 }

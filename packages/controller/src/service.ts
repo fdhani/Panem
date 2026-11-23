@@ -6,6 +6,7 @@ import {
   BackendError,
   type BackendPod,
   DEFAULT_TEMPLATE_ENV,
+  type FolderLock,
   type ForwarderState,
   type ForwarderStatus,
   type Job,
@@ -112,6 +113,11 @@ export class PodService {
   private readonly listeners = new Set<(e: ServerEvent) => void>();
   private lastSent = new Map<string, string>();
   private queue: Promise<void> = Promise.resolve();
+  /**
+   * DevPod reads the workspace folder while it builds (on the local machine it builds right in
+   * it), so builds take the workspace lock: memory saves, workspace hooks and other builds wait.
+   */
+  private readonly withFolder: FolderLock = (fn) => this.d.workspace.lock.run(fn);
   private fwd = new Map<string, FwdInfo>();
   /** True once backend.list() has succeeded, so "unknown pod" really means gone. */
   private backendListed = false;
@@ -544,6 +550,7 @@ export class PodService {
         env,
         files: git.plan?.files,
         sshAuthSock: git.agent?.sock,
+        withFolder: this.withFolder,
       })
       // The agent's keys were only for the clone: gone before anything else runs.
       .finally(() => git.agent?.dispose())
@@ -777,7 +784,12 @@ export class PodService {
   async start(id: string): Promise<Pod> {
     const pod = this.assertIdle(id);
     if (pod.machineStatus === "offline") throw new HttpError(409, "machine is offline");
-    await this.runOp(id, "starting", () => this.d.backend.start(id), "running");
+    await this.runOp(
+      id,
+      "starting",
+      () => this.d.backend.start(id, { withFolder: this.withFolder }),
+      "running",
+    );
     return this.get(id);
   }
 
@@ -914,7 +926,7 @@ export class PodService {
         const status = await this.backendStatus(meta.id);
         if (status === "stopped") {
           this.setOp(meta.id, { state: "starting" });
-          await this.d.backend.start(meta.id);
+          await this.d.backend.start(meta.id, { withFolder: this.withFolder });
         }
         this.setOp(meta.id, { state: "exporting" });
         await this.runBeforeDestroy(meta);

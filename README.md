@@ -334,6 +334,7 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 - **SSH git access exists only during setup and before-destroy hooks.** The agent in a pod can't `git push` over SSH. Give repos it should push to an `https://` URL and a token.
 - SSH keys with a passphrase can't be used: Panem can't unlock them unattended.
 - Forwarding Panem's scoped agent into `devpod ssh` with `--start-services=false` is tested with a fake DevPod. Check it on a real pod with a private repo.
+- **Builds take turns.** DevPod builds straight from the workspace folder on the controller's own machine, so a `devpod up` holds the workspace while it builds. Memory saves, workspace hooks and other summons wait for it (setup, such as cloning repos, still runs in parallel). A build that fails before any container exists is retried once; both attempts are in the pod's log. Unverified on real DevPod: that `devpod status` reports NotFound after a failed build, and that the retry builds cleanly.
 - Back up `~/.devpod` on the controller. If it is lost, re-add the machines; pods that DevPod lists again can be re-labelled with `panem rediscover`.
 - Using one Claude subscription on several machines at once: check Anthropic's terms.
 - **macOS hosts (Docker Desktop):** publishing on the Tailscale IP and reaching pod containers by their Docker IP need a real check.
