@@ -63,5 +63,4 @@ export const RELAY_PORT = 7699;
 /** Version of this Panem build; the controller expects forwarders to match it. */
 export const PANEM_VERSION = "0.2.0";
 
-export const FORWARDER_IMAGE = "ghcr.io/fdhani/panem/forwarder";
 export const FORWARDER_CONTAINER = "panem-forwarder";

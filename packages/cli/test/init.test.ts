@@ -170,3 +170,10 @@ test("the example template starts no services; CLAUDE.md tells the agent to star
   expect(claude).toContain("not running when the pod starts");
   expect(claude).toContain("docker compose stop");
 });
+
+test("the example template uses Panem's Feature from panem-features/, not a registry", async () => {
+  const { SCAFFOLD } = await import("../src/scaffold");
+  const devcontainer = SCAFFOLD["templates/example/.devcontainer/devcontainer.json"]!;
+  expect(devcontainer).toContain('"./panem-features/claude-code"');
+  expect(devcontainer).not.toContain("ghcr.io/fdhani/panem");
+});

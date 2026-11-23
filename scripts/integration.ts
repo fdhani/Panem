@@ -3,9 +3,10 @@
 // copying in from three kinds of source (the workspace folder, an overlay git repo, another
 // folder), stop/start, port exposure through the per-machine forwarder, saving memory back
 // into the workspace folder, delete. DevPod builds the pod from the workspace folder.
-// Needs the forwarder image built locally first (see .github/workflows/ci.yml).
+// Nothing is pulled from Panem's registry: the forwarder's code is copied to the machine and run
+// with the public Bun image, and the Features are written into the workspace like a summon does.
 //   DEVPOD=/path/to/devpod bun scripts/integration.ts
-import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
@@ -19,7 +20,7 @@ import {
   exportPod,
   syncIn,
 } from "@panem/controller";
-import { Config, PANEM_VERSION, resolveSync } from "@panem/core";
+import { Config, resolveSync } from "@panem/core";
 import { type PodMeta, claudeProjectDir, repoPath } from "@panem/core";
 
 const root = mkdtempSync(join(tmpdir(), "panem-it-"));
@@ -38,17 +39,14 @@ const src = join(root, "ws");
 const tpl = join(src, "templates/it/.devcontainer");
 mkdirSync(tpl, { recursive: true });
 mkdirSync(join(src, "memory/hello"), { recursive: true });
-// Only the agent Feature: it must bring the Panem base along by itself (as existing templates
-// rely on).
-cpSync(join(import.meta.dir, "../features/src/claude-code"), join(tpl, "claude-code"), {
-  recursive: true,
-});
+// Only the agent Feature, from panem-features/ as a summon writes it: it must bring the Panem
+// base along by itself.
 writeFileSync(
   join(tpl, "devcontainer.json"),
   JSON.stringify({
     image: "mcr.microsoft.com/devcontainers/base:ubuntu",
     remoteUser: "vscode",
-    features: { "./claude-code": { installClaude: false } },
+    features: { "./panem-features/claude-code": { installClaude: false } },
   }),
 );
 writeFileSync(join(src, "CLAUDE.md"), "# integration\n");
@@ -103,8 +101,6 @@ const cfg = Config.parse({
   apiToken: "integration-api-token-0123",
   relaySecret: RELAY_SECRET,
   forwarderToken: "integration-forwarder-0123",
-  // Built locally by CI before this script runs.
-  forwarder: { image: `ghcr.io/fdhani/panem/forwarder:${PANEM_VERSION}` },
 });
 // No Tailscale in CI: the forwarder publishes on 127.0.0.1.
 const forwarders = new ForwarderManager(cfg, new SshShell(), {
@@ -128,6 +124,8 @@ try {
   );
 
   step("up");
+  const delivered = await workspace.installFeatures("templates/it/.devcontainer/devcontainer.json");
+  assert(delivered.written > 0, "Features written into the workspace");
   await dp.up({
     id,
     machine: "m-local",

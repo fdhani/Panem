@@ -122,6 +122,16 @@ export function SummonPage() {
             ))}
           </Select>
         </Field>
+        {templates.data?.warnings
+          ?.filter((w) => w.name === templateName)
+          .map((w) => (
+            <p
+              key={w.warning}
+              className="rounded-lg bg-warn/10 px-3 py-2 text-sm break-words text-warn"
+            >
+              {w.warning}
+            </p>
+          ))}
         {missing.length > 0 && (
           <p className="rounded-lg bg-warn/10 px-3 py-2 text-sm text-warn">
             <span className="font-mono break-all">{missing.join(", ")}</span>{" "}

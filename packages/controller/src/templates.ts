@@ -6,6 +6,8 @@ import type { Workspace } from "./workspace";
 export interface TemplateLoadResult {
   templates: Template[];
   errors: { name: string; error: string }[];
+  /** Templates that load but probably won't build as they are (e.g. an unpublished Feature). */
+  warnings: { name: string; warning: string }[];
   /** Parsed panem.json (sync sources and rules), or undefined when there is none. */
   panem?: unknown;
 }
@@ -15,7 +17,7 @@ export class Templates {
 
   /** Templates in the workspace folder (none while no workspace is set). */
   async list(): Promise<TemplateLoadResult> {
-    if (!(await this.workspace.current())) return { templates: [], errors: [] };
+    if (!(await this.workspace.current())) return { templates: [], errors: [], warnings: [] };
     return loadTemplates(await this.workspace.dir());
   }
 
@@ -32,7 +34,7 @@ export class Templates {
 
 export async function loadTemplates(root: string): Promise<TemplateLoadResult> {
   const dir = join(root, "templates");
-  const out: TemplateLoadResult = { templates: [], errors: [] };
+  const out: TemplateLoadResult = { templates: [], errors: [], warnings: [] };
   let panemError: string | undefined;
   try {
     out.panem = JSON.parse(await readFile(join(root, "panem.json"), "utf8"));
@@ -59,6 +61,14 @@ export async function loadTemplates(root: string): Promise<TemplateLoadResult> {
       // Sync rules are checked here too, so a bad rule shows up before anyone summons.
       resolveSync(out.panem, t);
       out.templates.push({ ...t, devcontainerPath: devcontainerPathFor(t) });
+      const dc = await readFile(join(root, devcontainerPathFor(t)), "utf8").catch(() => "");
+      const old = dc.match(/ghcr\.io\/fdhani\/panem\/([a-z-]+)(:[^"]*)?/);
+      if (old) {
+        out.warnings.push({
+          name,
+          warning: `devcontainer.json uses ${old[0]}, which needs a published Panem release. Use "./panem-features/${old[1]}" instead: Panem puts its Features there at each summon.`,
+        });
+      }
     } catch (e) {
       out.errors.push({ name, error: e instanceof Error ? e.message : String(e) });
     }

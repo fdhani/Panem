@@ -7,11 +7,11 @@ Two kinds of Feature make a container a Panem pod:
 | `panem` (`src/panem`) | **The pod base**, agent-agnostic. Clones the pod's repos into `/codebase`, keeps Panem's files in `~/.panem`, runs the port relay, and runs the hooks of every agent installed next to it. |
 | `claude-code` (`src/claude-code`) | **An agent:** Claude Code with Remote Control. Brings the base along if a template doesn't list it. |
 
-A template lists one or more agents. Listing `panem` too is optional:
+A template lists one or more agents. Listing `panem` too is optional. Panem writes its Features next to each template's `devcontainer.json`, in `panem-features/`, at every summon (always the running Panem's version), so templates reference them locally and nothing has to be published:
 
 ```jsonc
 "features": {
-  "ghcr.io/fdhani/panem/claude-code:0": {
+  "./panem-features/claude-code": {
     "installClaude": true,      // native installer
     "remoteControl": true,      // run `claude remote-control` in tmux on every start
     "permissionMode": "default" // for Remote Control sessions

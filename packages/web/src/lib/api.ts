@@ -103,10 +103,11 @@ export const useTemplates = () =>
   useQuery({
     queryKey: keys.templates,
     queryFn: () =>
-      api<{ templates: Template[]; errors: { name: string; error: string }[] }>(
-        "GET",
-        "/api/templates",
-      ),
+      api<{
+        templates: Template[];
+        errors: { name: string; error: string }[];
+        warnings?: { name: string; warning: string }[];
+      }>("GET", "/api/templates"),
   });
 
 export const summon = (req: SummonRequest) => api<Pod>("POST", "/api/pods", req);

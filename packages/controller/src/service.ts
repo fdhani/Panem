@@ -467,6 +467,8 @@ export class PodService {
     } catch (e) {
       throw new HttpError(409, msg(e));
     }
+    // Panem's own Features, for templates that list "./panem-features/<id>" (no registry).
+    await this.d.workspace.installFeatures(devcontainerPathFor(template));
     const meta = PodMeta.parse({
       id: newPodId(template.name),
       template: template.name,

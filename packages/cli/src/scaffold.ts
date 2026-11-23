@@ -72,7 +72,8 @@ restart policy (\`restart: always\` or \`unless-stopped\`): they'd come back on 
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},
     "ghcr.io/devcontainers/features/docker-in-docker:2": {},
-    "ghcr.io/fdhani/panem/claude-code:0": { "permissionMode": "acceptEdits" }
+    // Panem's own Feature: Panem puts it in panem-features/ at each summon (no registry).
+    "./panem-features/claude-code": { "permissionMode": "acceptEdits" }
   }
   // No postStartCommand starting services (databases, backends): they'd run on every pod
   // start. The agent starts what a task needs, when it needs it (see CLAUDE.md).
