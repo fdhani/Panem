@@ -14,10 +14,11 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { type DeleteChoice, DeleteDialog } from "../components/delete-dialog";
+import { lowText } from "../components/resources";
 import { MachineDot, PodStateBadge } from "../components/status";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
-import { api, keys, queryClient, useJobs, usePods } from "../lib/api";
+import { api, keys, queryClient, useJobs, useMachines, usePods } from "../lib/api";
 import { podIssue } from "../lib/pod-issue";
 import { timeAgo } from "../lib/utils";
 import { QueryError } from "./shared";
@@ -36,6 +37,7 @@ export function PodsPage() {
           </Button>
         </Link>
       </div>
+      <LowMachines />
       {pods.isLoading && <p className="text-sm text-muted">Loading…</p>}
       {pods.data?.length === 0 && (
         <Card className="flex flex-col items-center gap-3 px-6 py-10 text-center">
@@ -61,6 +63,34 @@ export function PodsPage() {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** One line per machine that's low on RAM or Docker disk, linking to its page. */
+function LowMachines() {
+  const machines = useMachines();
+  const low = (machines.data ?? []).flatMap((m) => {
+    const t = lowText(m);
+    return t ? [{ m, t }] : [];
+  });
+  if (low.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2">
+      {low.map(({ m, t }) => (
+        <Link
+          key={m.name}
+          to="/machines/$name"
+          params={{ name: m.name }}
+          className="flex items-center gap-2 rounded-lg bg-warn/10 px-3 py-2 text-sm text-warn"
+        >
+          <AlertTriangle className="size-4 shrink-0" />
+          <span className="min-w-0 flex-1">
+            {m.name.replace(/^m-/, "")} is running low: {t}
+          </span>
+          <ChevronRight className="size-4 shrink-0" />
+        </Link>
+      ))}
     </div>
   );
 }

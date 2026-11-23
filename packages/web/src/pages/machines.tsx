@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { ChevronRight, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { agentsNeedingSignIn } from "../components/agent-logins";
+import { MachineResourcesLine } from "../components/resources";
 import { MachineDot } from "../components/status";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -56,6 +57,7 @@ export function MachinesPage() {
                     {m.user ? `${m.user}@` : ""}
                     {m.host} · {m.status} · {count} pod{count === 1 ? "" : "s"}
                   </p>
+                  <MachineResourcesLine machine={m} />
                   {(waiting.length > 0 || (m.forwarder && m.forwarder.status !== "disabled")) && (
                     <div className="mt-1.5 flex flex-wrap items-center gap-2">
                       {m.forwarder && m.forwarder.status !== "disabled" && (

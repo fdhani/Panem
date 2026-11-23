@@ -69,7 +69,7 @@ An agent Feature installs a folder `/usr/local/share/panem/agents/<id>/` contain
 
 Hooks run as the pod user. They can `. "$(dirname "$0")/../../lib.sh"` for the base's helpers:
 - `pod_json`, `primary_repo_dir`, `log`;
-- `agent_status <running|needs-login|stopped|error> [message]`: what the pod card shows for the agent (written to `~/.panem/agents/<id>.status.json`). Call it from `start.sh`;
+- `agent_status <running|needs-login|waiting|stopped|error> [message]`: what the pod card shows for the agent (`waiting`: it stopped at a question in the pod that nobody answered, e.g. a first-run prompt; put the question in the message) (written to `~/.panem/agents/<id>.status.json`). Call it from `start.sh`;
 - `$PANEM_CODE_ROOT`, `$PANEM_STATE_DIR`;
 - saved credentials, restored on every start.
 

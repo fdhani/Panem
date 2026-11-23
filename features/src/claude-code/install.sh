@@ -8,6 +8,7 @@ set -euo pipefail
 INSTALL_CLAUDE="${INSTALLCLAUDE:-true}"
 REMOTE_CONTROL="${REMOTECONTROL:-true}"
 PERMISSION_MODE="${PERMISSIONMODE:-default}"
+SPAWN="${SPAWN:-same-dir}"
 REMOTE_USER="${_REMOTE_USER:-root}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # Overridable for tests only; pods always use the default.
@@ -31,6 +32,7 @@ chmod 755 "$AGENT"/*.sh
 cat >"$AGENT/agent.env" <<ENV
 PANEM_REMOTE_CONTROL=${REMOTE_CONTROL}
 PANEM_PERMISSION_MODE=${PERMISSION_MODE}
+PANEM_RC_SPAWN=${SPAWN}
 ENV
 
 if [ "$INSTALL_CLAUDE" = "true" ]; then

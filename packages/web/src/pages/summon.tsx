@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { FolderOpen, Rocket } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { MachineFree } from "../components/resources";
 import { MachineDot } from "../components/status";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
@@ -166,6 +167,12 @@ export function SummonPage() {
             selected && (
               <span className="inline-flex items-center gap-1.5">
                 <MachineDot status={selected.status} /> {selected.host} is {selected.status}
+                {selected.resources && (
+                  <>
+                    {" · "}
+                    <MachineFree machine={selected} />
+                  </>
+                )}
               </span>
             )
           }

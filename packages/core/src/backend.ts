@@ -3,6 +3,11 @@ export interface BackendPod {
   id: string;
   machine: string;
   status: "running" | "stopped" | "busy" | "notfound" | "unknown";
+  /**
+   * The backend's own id for the pod's container, when it has one (DevPod: the workspace UID,
+   * which labels the container dev.containers.id=<uid>). Used to find its resource usage.
+   */
+  uid?: string;
 }
 
 export interface BackendMachine {

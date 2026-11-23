@@ -113,6 +113,8 @@ beforeAll(() => {
       'echo "${CLAUDE_CODE_OAUTH_TOKEN:-}" > .claude-stub.token',
       // A pod whose primary repo has .rc-fails: Remote Control refuses at once.
       'if [ -f .rc-fails ]; then echo "Error: Remote Control requires a full-scope login token."; exit 1; fi',
+      // .rc-prompts: a first-run question nobody answered (printed without a newline, then waits).
+      'if [ -f .rc-prompts ]; then printf "\\033[1mEnable Remote Control? (y/n)\\033[0m "; sleep 30; fi',
       "sleep 30",
       "",
     ].join("\n"),
@@ -266,6 +268,10 @@ describe("claude-code agent", () => {
     expect(cj.hasCompletedOnboarding).toBe(true);
     expect(cj.projects[`${p.code}/api`].hasTrustDialogAccepted).toBe(true);
     expect(cj.projects[p.code].hasTrustDialogAccepted).toBe(true);
+    // Remote Control's "Enable Remote Control?" is answered in advance; its machine id is left
+    // for Claude to generate.
+    expect(cj.remoteDialogSeen).toBe(true);
+    expect(cj.remoteControlMachineId).toBeUndefined();
   });
 
   const signIn = (p: ReturnType<typeof pod>) => {
@@ -285,7 +291,7 @@ describe("claude-code agent", () => {
     p.run("post-start.sh", { ...rest, ...fast, PANEM_RELAY_SECRET: "" });
     await waitFor(`${out}.args`);
     expect(readFileSync(`${out}.args`, "utf8")).toContain(
-      `${p.code}/api remote-control --name ${POD_ID}`,
+      `${p.code}/api remote-control --name ${POD_ID} --spawn=same-dir`,
     );
     // The token would take precedence over the sign-in: it's left out.
     expect(readFileSync(`${out}.token`, "utf8").trim()).toBe("");
@@ -309,6 +315,39 @@ describe("claude-code agent", () => {
     p.run("post-start.sh", { ...fast, PANEM_RELAY_PORT: "17996" });
     expect(status(p).state).toBe("error");
     expect(status(p).message).toContain("requires a full-scope login token");
+  });
+
+  test("a template's spawn option reaches Remote Control; ~/.claude.json gets remoteDialogSeen at start", async () => {
+    const p = pod({ "claude-code": "PANEM_RC_SPAWN=worktree\n" });
+    p.run("post-create.sh", env);
+    // A pod set up before Panem answered the first-run question.
+    const cjPath = join(p.home, ".claude.json");
+    const { remoteDialogSeen: _, ...before } = JSON.parse(readFileSync(cjPath, "utf8"));
+    writeFileSync(cjPath, JSON.stringify(before));
+    signIn(p);
+    p.run("post-start.sh", { ...fast, PANEM_RELAY_PORT: "17990" });
+    await waitFor(join(p.code, "api/.claude-stub.args"));
+    expect(readFileSync(join(p.code, "api/.claude-stub.args"), "utf8")).toContain(
+      "--spawn=worktree",
+    );
+    const cj = JSON.parse(readFileSync(cjPath, "utf8"));
+    expect(cj.remoteDialogSeen).toBe(true);
+    expect(cj.hasCompletedOnboarding).toBe(true);
+  });
+
+  test("a question Remote Control asks anyway is reported, not shown as running", () => {
+    const p = pod();
+    p.run("post-create.sh", env);
+    signIn(p);
+    // An earlier start's output in the log doesn't count.
+    mkdirSync(join(p.home, ".panem"), { recursive: true });
+    writeFileSync(join(p.home, ".panem/remote-control.log"), "Choose [1/2] (default: 1):\n");
+    writeFileSync(join(p.code, "api/.rc-prompts"), "");
+    p.run("post-start.sh", { ...fast, PANEM_RELAY_PORT: "17989" });
+    expect(status(p).state).toBe("waiting");
+    expect(status(p).message).toBe(
+      "Remote Control is waiting for an answer in the pod: Enable Remote Control? (y/n)",
+    );
   });
 
   test("turned off: reported as stopped, nothing started", async () => {
@@ -477,16 +516,19 @@ describe.skipIf(!canInstall)("install scripts", () => {
   test("the agent Feature alone brings the base and registers itself", () => {
     const d = mkdtempSync(join(root, "inst-"));
     const share = join(d, "share");
-    const out = install("claude-code", share, join(d, "codebase"), { REMOTECONTROL: "false" });
+    const out = install("claude-code", share, join(d, "codebase"), {
+      REMOTECONTROL: "false",
+      SPAWN: "worktree",
+    });
     expect(out).toContain(`installing the pod base ${vendored}`);
     expect(existsSync(join(share, "post-create.sh"))).toBe(true);
     expect(readFileSync(join(share, "VERSION"), "utf8").trim()).toBe(vendored);
     expect(JSON.parse(readFileSync(join(share, "agents/claude-code/agent.json"), "utf8")).id).toBe(
       "claude-code",
     );
-    expect(readFileSync(join(share, "agents/claude-code/agent.env"), "utf8")).toContain(
-      "PANEM_REMOTE_CONTROL=false",
-    );
+    const agentEnv = readFileSync(join(share, "agents/claude-code/agent.env"), "utf8");
+    expect(agentEnv).toContain("PANEM_REMOTE_CONTROL=false");
+    expect(agentEnv).toContain("PANEM_RC_SPAWN=worktree");
     // Sticky and world-writable, like /tmp.
     expect(
       Bun.spawnSync(["stat", "-c", "%a", join(d, "codebase")])

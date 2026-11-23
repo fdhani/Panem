@@ -35,6 +35,7 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 const LoginRequest = z.object({ pod: z.string().optional() });
+const PruneRequest = z.object({ volumes: z.array(z.string().min(1)).min(1).max(500) });
 
 async function body<T extends z.ZodTypeAny>(req: Request, schema: T): Promise<z.infer<T>> {
   let raw: unknown;
@@ -111,6 +112,15 @@ export function createApp(d: ApiDeps): Hono {
     const { pod } = await body(c.req.raw, LoginRequest);
     const t = service.loginTarget(c.req.param("name"), c.req.param("agent"), pod);
     return c.json(await service.signedIn(t.machine, t.agent, t.pod));
+  });
+
+  // Docker-in-Docker volumes no container uses and no pod recorded, and removing chosen ones.
+  app.get("/api/machines/:name/orphans", async (c) =>
+    c.json(await service.orphanVolumes(c.req.param("name"))),
+  );
+  app.post("/api/machines/:name/prune", async (c) => {
+    const { volumes } = await body(c.req.raw, PruneRequest);
+    return c.json(await service.pruneVolumes(c.req.param("name"), volumes));
   });
 
   app.get("/api/workspace", async (c) => c.json({ dir: await d.workspace.current() }));
