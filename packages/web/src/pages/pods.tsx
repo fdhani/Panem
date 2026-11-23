@@ -19,6 +19,7 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { api, keys, queryClient, useJobs, usePods } from "../lib/api";
+import { podIssue } from "../lib/pod-issue";
 import { timeAgo } from "../lib/utils";
 import { QueryError } from "./shared";
 
@@ -203,38 +204,17 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
   );
 }
 
-/** Problems worth a glance on the card; the pod's page has the details. */
-export function podIssues(pod: Pod): { tone: "warn" | "bad"; text: string }[] {
-  const out: { tone: "warn" | "bad"; text: string }[] = [];
-  if (pod.error)
-    out.push({ tone: "bad", text: pod.state === "error" ? "Something went wrong" : "Error" });
-  if (pod.state === "running") {
-    for (const a of pod.agents ?? []) {
-      if (a.status?.state === "needs-login")
-        out.push({ tone: "warn", text: `${a.label || a.id} needs sign-in` });
-      if (a.status?.state === "error")
-        out.push({ tone: "bad", text: `${a.label || a.id} stopped` });
-    }
-  }
-  return out;
-}
-
-/** A short line on the card when something needs attention, linking to the pod's page. */
 function PodIssues({ pod }: { pod: Pod }) {
-  const issues = podIssues(pod);
-  if (!issues.length) return null;
-  const bad = issues.some((i) => i.tone === "bad");
+  const issue = podIssue(pod);
+  if (!issue) return null;
   return (
     <Link
       to="/pods/$id"
       params={{ id: pod.id }}
-      className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${bad ? "bg-bad/10 text-bad" : "bg-warn/10 text-warn"}`}
+      className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${issue.tone === "bad" ? "bg-bad/10 text-bad" : "bg-warn/10 text-warn"}`}
     >
       <AlertTriangle className="size-4 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">
-        {issues[0]!.text}
-        {issues.length > 1 && <span className="font-medium"> +{issues.length - 1}</span>}
-      </span>
+      <span className="min-w-0 flex-1 truncate">{issue.text}</span>
       <span className="shrink-0 font-medium">Details</span>
       <ChevronRight className="size-4 shrink-0" />
     </Link>
