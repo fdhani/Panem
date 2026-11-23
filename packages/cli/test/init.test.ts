@@ -177,3 +177,10 @@ test("the example template uses Panem's Feature from panem-features/, not a regi
   expect(devcontainer).toContain('"./panem-features/claude-code"');
   expect(devcontainer).not.toContain("ghcr.io/fdhani/panem");
 });
+
+test("the example template pins its base image (base:ubuntu is 26.04, which breaks docker-in-docker)", async () => {
+  const { SCAFFOLD } = await import("../src/scaffold");
+  const dc = SCAFFOLD["templates/example/.devcontainer/devcontainer.json"]!;
+  expect(dc).toContain('"mcr.microsoft.com/devcontainers/base:ubuntu-24.04"');
+  expect(dc).not.toMatch(/base:ubuntu"/);
+});

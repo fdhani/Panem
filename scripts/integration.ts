@@ -44,7 +44,7 @@ mkdirSync(join(src, "memory/hello"), { recursive: true });
 writeFileSync(
   join(tpl, "devcontainer.json"),
   JSON.stringify({
-    image: "mcr.microsoft.com/devcontainers/base:ubuntu",
+    image: "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
     remoteUser: "vscode",
     features: { "./panem-features/claude-code": { installClaude: false } },
   }),

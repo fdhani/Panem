@@ -67,7 +67,9 @@ restart policy (\`restart: always\` or \`unless-stopped\`): they'd come back on 
 `,
   "templates/example/.devcontainer/devcontainer.json": `{
   "name": "example",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  // Pinned: the plain "ubuntu" tag now means Ubuntu 26.04, where docker-in-docker's default
+  // moby: true fails (no moby packages for that release).
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
   "remoteUser": "vscode",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},
