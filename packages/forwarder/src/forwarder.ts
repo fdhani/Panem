@@ -33,6 +33,8 @@ export interface ForwarderOptions {
   log?: (m: string) => void;
   /** How the relay is reached (tests replace it). */
   connect?: Connect;
+  /** Override NOT_A_POD_RETRY_MS (tests). */
+  notAPodRetryMs?: number;
 }
 
 /**
@@ -46,7 +48,12 @@ export function isDevcontainer(c: ContainerInfo): boolean {
   );
 }
 
-const NOT_A_POD_RETRY_MS = 30_000;
+/**
+ * How long a container that didn't answer as a pod is left before asking again. A pod's
+ * container exists well before its relay starts (setup runs first), so this is how late a new
+ * pod can be found. Cheap to keep short: only devcontainers are probed, with a 1 s limit.
+ */
+export const NOT_A_POD_RETRY_MS = 5_000;
 
 /**
  * One per machine. Finds pods by asking each running container's relay for its pod.json,
@@ -148,7 +155,8 @@ export class Forwarder {
   private async probe(c: ContainerInfo, ip: string): Promise<PodMetaLite | undefined> {
     const cached = this.probed.get(c.id);
     if (typeof cached === "object") return cached;
-    if (typeof cached === "number" && Date.now() - cached < NOT_A_POD_RETRY_MS) return undefined;
+    const retryMs = this.o.notAPodRetryMs ?? NOT_A_POD_RETRY_MS;
+    if (typeof cached === "number" && Date.now() - cached < retryMs) return undefined;
     try {
       const raw = await relayAsk(
         { ip, port: this.o.relayPort },

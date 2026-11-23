@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Allocator } from "../src/alloc";
-import { Forwarder } from "../src/forwarder";
+import { Forwarder, NOT_A_POD_RETRY_MS } from "../src/forwarder";
 import { type Connect, relayAsk } from "../src/relay";
 import { FakeDocker, SECRET, fakeRelay, freePortRange } from "./fakes";
 
@@ -44,7 +44,7 @@ describe("relayAsk time limit", () => {
   });
 });
 
-async function setup(connect: Connect, selfId?: string) {
+async function setup(connect: Connect, selfId?: string, notAPodRetryMs?: number) {
   const base = await freePortRange(10);
   const relayPort = await freePortRange(1);
   const docker = new FakeDocker();
@@ -57,11 +57,34 @@ async function setup(connect: Connect, selfId?: string) {
     relayPort,
     selfId,
     connect,
+    notAPodRetryMs,
     log: () => {},
   });
   cleanup.push(() => fwd.stop());
   return { fwd, docker, relayPort };
 }
+
+describe("a new pod is found soon after its relay starts", () => {
+  test("a container that didn't answer is asked again after the retry interval", async () => {
+    expect(NOT_A_POD_RETRY_MS).toBeLessThanOrEqual(5_000);
+    const { fwd, docker, relayPort } = await setup(Bun.connect, undefined, 150);
+    docker.add("c1", "127.0.0.3");
+    await fwd.tick(); // the container exists; its relay doesn't run yet (setup is still going)
+    expect(fwd.state().pods).toEqual([]);
+    const relay = fakeRelay({
+      ip: "127.0.0.3",
+      port: relayPort,
+      meta: { id: "shop-bbbbbb" },
+      listening: () => [],
+    });
+    cleanup.push(() => relay.stop(true));
+    await fwd.tick(); // too soon: not asked again yet
+    expect(fwd.state().pods).toEqual([]);
+    await Bun.sleep(200);
+    await fwd.tick();
+    expect(fwd.state().pods.map((p) => p.id)).toEqual(["shop-bbbbbb"]);
+  });
+});
 
 describe("ticks stay short", () => {
   test("one unreachable container doesn't hold up the tick or hide other pods", async () => {
