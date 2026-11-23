@@ -14,7 +14,10 @@ import {
   BOOTSTRAP_CREATE,
   DevPodBackend,
   KEEP_LOGS,
+  excerpt,
   failureSummary,
+  headline,
+  isStackFrame,
   parseProviders,
   parseStatus,
 } from "../src";
@@ -361,6 +364,74 @@ describe("devpod up diagnostics", () => {
     }
     expect(readdirSync(logDir)).toHaveLength(KEEP_LOGS);
     expect(existsSync(join(logDir, `p${KEEP_LOGS + 2}.log`))).toBe(true);
+  });
+});
+
+describe("a failed build keeps its error, not the stack trace", () => {
+  const out = readFileSync(join(import.meta.dir, "fixtures/devpod-up-build-failure.log"), "utf8");
+
+  test("Go stack frames are recognised; ordinary lines aren't", () => {
+    for (const l of [
+      "05:27:35 info github.com/loft-sh/devpod/pkg/devcontainer.(*runner).Up",
+      "05:27:35 info \t/home/runner/work/devpod/devpod/pkg/devcontainer/build.go:123",
+      "05:27:35 info github.com/loft-sh/devpod/cmd.(*UpCmd).Run(0xc000123000, {0x2a1b3c0, 0xc0004b2000})",
+      "\t/home/runner/work/devpod/devpod/cmd/up.go:80 +0x1a5",
+      "05:27:35 info runtime.goexit",
+      "goroutine 1 [running]:",
+      "main.main()",
+    ]) {
+      expect(isStackFrame(l)).toBe(true);
+    }
+    for (const l of [
+      "05:27:22 info Build image",
+      "05:27:24 info #7 ERROR: failed to calculate checksum",
+      "05:27:20 info Workspace omni is using local folder /home/me/ws",
+      "05:27:35 fatal Process exited with status 1",
+    ]) {
+      expect(isStackFrame(l)).toBe(false);
+    }
+  });
+
+  test("the headline is the build's first error, not 'Process exited'", () => {
+    expect(headline(out)).toBe(
+      'info #7 ERROR: failed to calculate checksum of ref 1c2d::q9x: "/.devpod-internal": not found',
+    );
+  });
+
+  test("the kept lines: no frames, the error with what led to it, and the end", () => {
+    const kept = excerpt(out);
+    expect(kept.some((l) => l.includes("github.com/loft-sh") || l.includes(".go:"))).toBe(false);
+    expect(kept.some((l) => l.includes("COPY ./.devpod-internal/ /tmp/build-features/"))).toBe(
+      true,
+    );
+    expect(kept.some((l) => l.includes("ERROR: failed to solve"))).toBe(true);
+    expect(kept.at(-1)).toBe("05:27:35 fatal Process exited with status 1");
+    expect(kept.length).toBeLessThan(40);
+  });
+
+  test("a long run keeps the first error's context and the end, with a gap between", () => {
+    const filler = Array.from({ length: 200 }, (_, i) => `info step ${i}`);
+    const kept = excerpt(
+      ["info start", "error: first problem", ...filler, "fatal done"].join("\n"),
+    );
+    expect(kept[1]).toBe("error: first problem");
+    expect(kept).toContain("…");
+    expect(kept.at(-1)).toBe("fatal done");
+    expect(kept.length).toBeLessThanOrEqual(2 + 30 + 1 + 30);
+  });
+
+  test("devpod up failing this way: the pod's error and detail come from the excerpt", async () => {
+    fake("up", out, 1);
+    const err: BackendError = await dp
+      .up({ id: "p1", machine: "m-a", source: "/ws", devcontainerPath: "p", env: {} })
+      .then(
+        () => {
+          throw new Error("expected a failure");
+        },
+        (e: BackendError) => e,
+      );
+    expect(err.message).toContain("devpod up failed: info #7 ERROR: failed to calculate checksum");
+    expect(err.detail?.some((l) => l.includes("runtime.goexit"))).toBe(false);
   });
 });
 

@@ -180,11 +180,11 @@ export class DevPodBackend implements PodBackend {
       await this.saveLog(o.id, "devpod up", out);
       if (res.exitCode !== 0) {
         const err = new BackendError(
-          `devpod up failed: ${lastMeaningful(out)}`,
+          `devpod up failed: ${headline(out)}`,
           res.stderr,
           res.exitCode,
         );
-        err.detail = tail(out, 60);
+        err.detail = excerpt(out);
         throw err;
       }
     } finally {
@@ -250,7 +250,7 @@ export class DevPodBackend implements PodBackend {
         r.stderr,
         r.exitCode,
       );
-      err.detail = tail(out, 60);
+      err.detail = excerpt(out);
       throw err;
     }
   }
@@ -425,7 +425,7 @@ export function failureSummary(out: string): string {
 }
 
 /** Saved `devpod up` logs kept per controller (newest first). */
-export const KEEP_LOGS = 20;
+export const KEEP_LOGS = 50;
 
 /**
  * Output made readable and safe to keep: terminal escape codes and carriage-return redraws
@@ -452,11 +452,77 @@ export function tail(s: string, n: number): string[] {
     .slice(-n);
 }
 
-/** The most useful single line: the last error-looking one, else the last line. */
-function lastMeaningful(out: string): string {
-  const lines = tail(out, 200);
-  const err = [...lines].reverse().find((l) => /\b(error|fatal|failed)\b/i.test(l));
-  return (err ?? lines.at(-1) ?? "unknown error").trim();
+/** DevPod's line prefix: an optional time, then a level ("05:27:35 info ..."). */
+const PREFIX = /^(?:\d\d:\d\d:\d\d\s+)?(?:(debug|info|warn|error|fatal|done)\s+)?/;
+
+function split(line: string): { level?: string; text: string } {
+  const m = line.match(PREFIX)!;
+  return { level: m[1], text: line.slice(m[0].length).trim() };
+}
+
+/**
+ * A Go stack-trace line, as DevPod prints them after a failure: a function
+ * ("github.com/loft-sh/devpod/pkg/x.(*runner).Up", "main.main()", "runtime.goexit") or a
+ * source position ("/home/runner/work/devpod/x.go:123 +0x1a", or a .s file), or "goroutine 1 [running]:".
+ */
+export function isStackFrame(line: string): boolean {
+  const t = split(line).text;
+  if (!t) return false;
+  if (/^\/\S+\.(go|s):\d+(\s+\+0x[0-9a-f]+)?$/.test(t)) return true;
+  if (/^goroutine \d+ \[/.test(t)) return true;
+  if (/^(github\.com|golang\.org|gopkg\.in|k8s\.io|google\.golang\.org)\/[^\s(]+(\(.*\))?$/.test(t))
+    return true;
+  if (/^(main|runtime|sync|os\/exec|net\/http)\.[\w.()*]+(\(.*\))?$/.test(t)) return true;
+  return /^[\w./-]+\.\(\*?\w+\)\.\w+(\(.*\))?$/.test(t);
+}
+
+/** "Process exited with status 1": says that something failed, not what. */
+const GENERIC = /(Process exited with status \d+|exit status \d+)$/;
+
+/**
+ * The first line that says why something failed: a BuildKit error ("#8 ERROR: ...",
+ * "ERROR: failed to solve: ..."), an error or fatal line, or "Error: ...". Debug lines, stack
+ * frames and the generic "Process exited with status N" don't count.
+ */
+export function firstError(lines: string[]): number {
+  return lines.findIndex((l) => {
+    if (isStackFrame(l)) return false;
+    const { level, text } = split(l);
+    if (level === "debug" || GENERIC.test(text)) return false;
+    return (
+      /(^#\d+ .*)?\bERROR:/.test(text) ||
+      level === "error" ||
+      level === "fatal" ||
+      /^(Error|error):/.test(text)
+    );
+  });
+}
+
+/**
+ * The lines to keep with a failed pod: stack frames dropped, the first error with what led to
+ * it and what followed, then the end of the output. The whole output is in the saved log.
+ */
+export function excerpt(out: string, before = 8, after = 30, end = 30): string[] {
+  const lines = out.split("\n").filter((l) => l.trim() && !isStackFrame(l));
+  const i = firstError(lines);
+  if (i < 0) return lines.slice(-end);
+  const from = Math.max(0, i - before);
+  const to = i + after + 1;
+  if (to >= lines.length - end) return lines.slice(from).slice(0, before + after + 1 + end);
+  return [...lines.slice(from, to), "…", ...lines.slice(-end)];
+}
+
+/** The one line for the pod's error: the first real error, else the last error-looking line. */
+export function headline(out: string): string {
+  const lines = out.split("\n").filter((l) => l.trim() && !isStackFrame(l));
+  const i = firstError(lines);
+  const line =
+    i >= 0
+      ? lines[i]!
+      : ([...lines].reverse().find((l) => /\b(error|fatal|failed)\b/i.test(l)) ??
+        lines.at(-1) ??
+        "unknown error");
+  return line.replace(/^\d\d:\d\d:\d\d\s+/, "").trim();
 }
 
 // ---- parsers (exported for tests; DevPod JSON shapes are not a stable API) ----
