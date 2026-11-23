@@ -6,6 +6,28 @@ import { derivedConfig } from "./devcontainer-config";
 import { Mutex } from "./git";
 import { featuresHash, panemFeatures } from "./machine-assets";
 
+/** One Docker volume per machine for agents' shared sign-ins (agent.json "login.share"). */
+export const LOGINS_MOUNT = {
+  source: "panem-logins",
+  target: "/var/lib/panem/logins",
+  type: "volume",
+};
+
+/** Whether any of these shipped agents keeps its sign-in in the machine's volume. */
+async function sharesLogins(ids: string[]): Promise<boolean> {
+  for (const f of await panemFeatures()) {
+    const m = /^([^/]+)\/agent\/agent\.json$/.exec(f.path);
+    if (!m || !ids.includes(m[1]!)) continue;
+    try {
+      const a = JSON.parse(new TextDecoder().decode(f.data)) as { login?: { share?: string[] } };
+      if (a.login?.share?.length) return true;
+    } catch {
+      // not ours to judge here
+    }
+  }
+  return false;
+}
+
 /** Folder next to a template's devcontainer.json where Panem keeps its Features up to date. */
 export const FEATURES_DIR = "panem-features";
 
@@ -179,6 +201,10 @@ export class Workspace {
       let derived: ReturnType<typeof derivedConfig>;
       try {
         derived = derivedConfig(raw, build);
+        // Agents that keep their sign-in per machine get the machine's login volume, once.
+        if (derived && (await sharesLogins(derived.ids))) {
+          derived = derivedConfig(raw, build, { mounts: [LOGINS_MOUNT] });
+        }
       } catch (e) {
         throw new WorkspaceError(`${devcontainerPath}: not valid JSON: ${(e as Error).message}`);
       }

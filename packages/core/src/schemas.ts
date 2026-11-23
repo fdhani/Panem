@@ -43,10 +43,26 @@ export const TemplateHooks = z
 export type TemplateHooks = z.infer<typeof TemplateHooks>;
 
 /** An agent installed in a pod (from ~/.panem/agents.json, written by the Panem base). */
+/** How an agent reports itself (agent_status in the pod; see features/README.md). */
+export const AgentState = z.enum(["running", "needs-login", "stopped", "error"]);
+export type AgentState = z.infer<typeof AgentState>;
+
 export const AgentInfo = z.object({
   id: z.string(),
   label: z.string().default(""),
   connect: z.array(z.object({ label: z.string(), url: z.string().url() })).default([]),
+  /** The agent's own sign-in, run with `panem pod login`; its files can be shared per machine. */
+  login: z
+    .object({
+      label: z.string().default("Sign in"),
+      command: z.string().optional(),
+      share: z.array(z.string()).optional(),
+    })
+    .optional(),
+  /** Last reported state (from the agent's start hook). */
+  status: z
+    .object({ state: AgentState, message: z.string().default(""), at: z.string().optional() })
+    .optional(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 

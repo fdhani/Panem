@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -96,7 +97,25 @@ beforeAll(() => {
     join(bin, "claude"),
     // Writes next to where it runs (the pod's primary repo): tmux sessions inherit the tmux
     // server's environment, not the caller's, so an env var can't say where.
-    `#!/bin/sh\necho "$PWD $*" > .claude-stub.args\necho "$CLAUDE_CODE_OAUTH_TOKEN" > .claude-stub.token\nsleep 30\n`,
+    [
+      "#!/bin/sh",
+      // `claude auth status --json`: signed in to claude.ai iff the login file exists (runs in
+      // start.sh itself, so $HOME is the pod's).
+      'if [ "$1" = auth ] && [ "$2" = status ]; then',
+      '  if [ -f "$HOME/.claude/.credentials.json" ]; then echo \'{"loggedIn":true,"authMethod":"claude.ai"}\'; else echo \'{"loggedIn":false,"authMethod":"none"}\'; fi',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = auth ] && [ "$2" = login ]; then',
+      '  mkdir -p "$HOME/.claude" && echo \'{"claudeAiOauth":"x"}\' > "$HOME/.claude/.credentials.json" && echo signed-in',
+      "  exit 0",
+      "fi",
+      'echo "$PWD $*" > .claude-stub.args',
+      'echo "${CLAUDE_CODE_OAUTH_TOKEN:-}" > .claude-stub.token',
+      // A pod whose primary repo has .rc-fails: Remote Control refuses at once.
+      'if [ -f .rc-fails ]; then echo "Error: Remote Control requires a full-scope login token."; exit 1; fi',
+      "sleep 30",
+      "",
+    ].join("\n"),
     { mode: 0o755 },
   );
   const api = makeRepo("api");
@@ -136,6 +155,11 @@ describe("base: post-create", () => {
         id: "claude-code",
         label: "Claude Code",
         connect: [{ label: "Open in Claude", url: "https://claude.ai/code" }],
+        login: {
+          label: "Sign in to Claude",
+          command: "env -u CLAUDE_CODE_OAUTH_TOKEN claude auth login",
+          share: [".claude/.credentials.json"],
+        },
       },
     ]);
   });
@@ -243,38 +267,91 @@ describe("claude-code agent", () => {
     expect(cj.projects[p.code].hasTrustDialogAccepted).toBe(true);
   });
 
-  test("start launches Remote Control in the primary repo with the token", async () => {
+  const signIn = (p: ReturnType<typeof pod>) => {
+    mkdirSync(join(p.home, ".claude"), { recursive: true });
+    writeFileSync(join(p.home, ".claude/.credentials.json"), '{"claudeAiOauth":"x"}');
+  };
+  const status = (p: ReturnType<typeof pod>) =>
+    JSON.parse(readFileSync(join(p.home, ".panem/agents/claude-code.status.json"), "utf8"));
+  const fast = { PANEM_RC_SETTLE_SECONDS: "1", PANEM_LOGINS_DIR: "/nonexistent" };
+
+  test("signed in: Remote Control starts in the primary repo, without the setup-token", async () => {
     const p = pod();
     p.run("post-create.sh", env);
+    signIn(p);
     const out = join(p.code, "api/.claude-stub");
     const { PANEM_POD: _, ...rest } = env;
-    p.run("post-start.sh", { ...rest, PANEM_RELAY_SECRET: "" });
+    p.run("post-start.sh", { ...rest, ...fast, PANEM_RELAY_SECRET: "" });
     await waitFor(`${out}.args`);
     expect(readFileSync(`${out}.args`, "utf8")).toContain(
       `${p.code}/api remote-control --name ${POD_ID}`,
     );
-    expect(readFileSync(`${out}.token`, "utf8").trim()).toBe("tok-123");
+    // The token would take precedence over the sign-in: it's left out.
+    expect(readFileSync(`${out}.token`, "utf8").trim()).toBe("");
+    expect(status(p)).toMatchObject({ id: "claude-code", state: "running" });
   });
 
-  test("start reuses the token saved at create time", async () => {
+  test("with only a setup-token, Remote Control isn't started and the card says it needs sign-in", () => {
     const p = pod();
     p.run("post-create.sh", env);
-    const out = join(p.code, "api/.claude-stub");
-    // Nothing in the live environment: the token comes from ~/.config/panem/env.
-    p.run("post-start.sh", { PANEM_RELAY_PORT: "17999" });
-    await waitFor(`${out}.token`);
-    expect(readFileSync(`${out}.token`, "utf8").trim()).toBe("tok-123");
+    p.run("post-start.sh", { ...fast, PANEM_RELAY_PORT: "17998" });
+    expect(existsSync(join(p.code, "api/.claude-stub.args"))).toBe(false);
+    expect(status(p)).toMatchObject({ state: "needs-login" });
+    expect(status(p).message).toContain("claude.ai sign-in");
   });
 
-  test("start skips cleanly without credentials, or when Remote Control is off", async () => {
+  test("Remote Control exiting at once is reported with its message", async () => {
     const p = pod();
-    const r = p.run("post-start.sh");
-    expect(r.err).toContain("no CLAUDE_CODE_OAUTH_TOKEN");
+    p.run("post-create.sh", env);
+    signIn(p);
+    writeFileSync(join(p.code, "api/.rc-fails"), "");
+    p.run("post-start.sh", { ...fast, PANEM_RELAY_PORT: "17996" });
+    expect(status(p).state).toBe("error");
+    expect(status(p).message).toContain("requires a full-scope login token");
+  });
+
+  test("turned off: reported as stopped, nothing started", async () => {
     const off = pod({ "claude-code": "PANEM_REMOTE_CONTROL=false\n" });
     off.run("post-create.sh", env);
-    off.run("post-start.sh", { PANEM_RELAY_PORT: "17997" });
+    off.run("post-start.sh", { ...fast, PANEM_RELAY_PORT: "17997" });
     await Bun.sleep(300);
     expect(existsSync(join(off.code, "api/.claude-stub.args"))).toBe(false);
+    expect(status(off).state).toBe("stopped");
+  });
+
+  test("one sign-in per machine: the login lives in the machine's volume, shared by its pods", () => {
+    const logins = mkdtempSync(join(root, "logins-"));
+    const a = pod();
+    a.run("post-create.sh", env);
+    // A login made in the pod before the volume existed moves into it.
+    signIn(a);
+    a.run("post-start.sh", { ...fast, PANEM_LOGINS_DIR: logins, PANEM_RELAY_PORT: "17995" });
+    const shared = join(logins, "claude-code/.claude/.credentials.json");
+    expect(existsSync(shared)).toBe(true);
+    expect(readlinkSync(join(a.home, ".claude/.credentials.json"))).toBe(shared);
+    expect(status(a).state).toBe("running");
+
+    // Another pod on the same machine starts signed in.
+    const b = pod();
+    b.run("post-create.sh", env);
+    b.run("post-start.sh", { ...fast, PANEM_LOGINS_DIR: logins, PANEM_RELAY_PORT: "17994" });
+    expect(readlinkSync(join(b.home, ".claude/.credentials.json"))).toBe(shared);
+    expect(status(b).state).toBe("running");
+  });
+
+  test("agent-login.sh runs the agent's own sign-in, straight into the shared volume", () => {
+    const logins = mkdtempSync(join(root, "logins-"));
+    const p = pod();
+    p.run("post-create.sh", env);
+    const r = Bun.spawnSync(["bash", join(p.share, "agent-login.sh"), "claude-code"], {
+      env: { PATH: `${bin}:${process.env.PATH}`, HOME: p.home, PANEM_LOGINS_DIR: logins },
+    });
+    expect(r.stdout.toString()).toContain("signed-in");
+    expect(existsSync(join(logins, "claude-code/.claude/.credentials.json"))).toBe(true);
+    const bad = Bun.spawnSync(["bash", join(p.share, "agent-login.sh"), "../x"], {
+      env: { PATH: process.env.PATH!, HOME: p.home },
+    });
+    expect(bad.exitCode).not.toBe(0);
   });
 });
 

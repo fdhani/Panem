@@ -62,15 +62,28 @@ An agent Feature installs a folder `/usr/local/share/panem/agents/<id>/` contain
 
 | File | Required | What it is |
 | --- | --- | --- |
-| `agent.json` | yes | `{ "id": "<id>", "label": "Name", "connect": [{ "label": "Open in …", "url": "https://…" }] }`. The pod card shows one button per `connect` entry. |
+| `agent.json` | yes | `{ "id": "<id>", "label": "Name", "connect": [{ "label": "Open in …", "url": "https://…" }], "login": { … } }`. The pod card shows one button per `connect` entry. `login` is optional (below). |
 | `setup.sh` | no | Runs once after the repos are cloned, e.g. trust settings. Failing fails pod setup. |
 | `start.sh` | no | Runs on every start, e.g. a remote-access session in tmux. Failing is logged. |
 | `before-destroy.sh` | no | Runs before the pod is deleted (from `/codebase`), before the template's own hook and before agent memory is saved, e.g. to push the agent's state somewhere. Runs on every delete except a force delete. Failing keeps the pod. The controller runs it, so it works with any version of the base. |
 
 Hooks run as the pod user. They can `. "$(dirname "$0")/../../lib.sh"` for the base's helpers:
 - `pod_json`, `primary_repo_dir`, `log`;
+- `agent_status <running|needs-login|stopped|error> [message]`: what the pod card shows for the agent (written to `~/.panem/agents/<id>.status.json`). Call it from `start.sh`;
 - `$PANEM_CODE_ROOT`, `$PANEM_STATE_DIR`;
 - saved credentials, restored on every start.
+
+**Signing in (`agent.json` `login`):**
+```json
+"login": {
+  "label": "Sign in to Claude",
+  "command": "env -u CLAUDE_CODE_OAUTH_TOKEN claude auth login",
+  "share": [".claude/.credentials.json"]
+}
+```
+- `command` is the agent's own interactive sign-in. `panem pod login <pod> [agent]` runs it in the user's terminal through the base's `agent-login.sh`, then restarts just that agent (`PANEM_ONLY_AGENT=<id> post-start.sh`).
+- `share` lists files, relative to `$HOME`, that hold the login. Before each start, the base keeps them in `/var/lib/panem/logins/<id>/` and links them back. That's a Docker volume per machine (`panem-logins`), mounted by the controller's generated config, so one sign-in serves every pod on the machine. Without the volume nothing changes.
+- When `start.sh` finds no usable login, report `needs-login`: the card then tells the user what to run.
 
 To work in templates that list only the agent, the Feature carries the base as `panem-base/` and installs it when it's missing or older (see `src/claude-code/install.sh`).
 - `bun scripts/vendor-feature-base.ts` refreshes every agent's copy.

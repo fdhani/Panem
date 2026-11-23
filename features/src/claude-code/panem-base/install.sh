@@ -37,6 +37,12 @@ printf '%s\n' "$VERSION" >"$SHARE/VERSION"
 # Which build of Panem's Features this image has (the panemBuild option), checked at setup.
 if [ -n "${PANEMBUILD:-}" ]; then printf '%s\n' "$PANEMBUILD" >"$SHARE/BUILD"; fi
 
+# Where the machine's sign-in volume is mounted. A fresh Docker volume takes this folder's
+# permissions, so pod users can write to it.
+LOGINS="${PANEM_INSTALL_LOGINS:-/var/lib/panem/logins}"
+mkdir -p "$LOGINS"
+chmod 1777 "$LOGINS"
+
 mkdir -p "$CODE_ROOT"
 chown "$REMOTE_USER" "$CODE_ROOT" 2>/dev/null || true
 # Devcontainer tooling may remap the user's UID to the host's after this build step, which

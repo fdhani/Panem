@@ -664,17 +664,63 @@ export class PodService {
     }
   }
 
-  /** Which agents the pod has and how to reach them (~/.panem/agents.json, from the base). */
+  /**
+   * Which agents the pod has, how to reach them (~/.panem/agents.json, from the base), and how
+   * each last reported itself (~/.panem/agents/<id>.status.json, from agent_status).
+   */
   private async recordAgents(id: string): Promise<void> {
-    const r = await this.d.backend.exec(id, `cat "$HOME/.panem/agents.json"`);
+    const r = await this.d.backend.exec(
+      id,
+      // No agents.json fails (an older Feature); no status files is fine.
+      `cat "$HOME/.panem/agents.json" || exit 1; echo ${STATUS_MARK}; for f in "$HOME"/.panem/agents/*.status.json; do if [ -f "$f" ]; then tr -d '\\n' < "$f"; echo; fi; done; exit 0`,
+    );
     if (r.exitCode !== 0) return; // a Feature from before agents were pluggable: see toPod
     try {
-      const agents = z.array(AgentInfo).parse(JSON.parse(new TextDecoder().decode(r.stdout)));
+      const [list = "", statuses = ""] = new TextDecoder().decode(r.stdout).split(STATUS_MARK);
+      const byId = new Map<string, AgentInfo["status"]>();
+      for (const line of statuses.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const s = JSON.parse(line) as {
+            id?: string;
+            state?: string;
+            message?: string;
+            at?: string;
+          };
+          const parsed = AgentInfo.shape.status.safeParse(s);
+          if (s.id && parsed.success) byId.set(s.id, parsed.data);
+        } catch {
+          // One unreadable status file doesn't hide the others.
+        }
+      }
+      const agents = z
+        .array(AgentInfo)
+        .parse(JSON.parse(list))
+        .map((a) => ({ ...a, status: byId.get(a.id) ?? a.status }));
       const current = this.d.pods.get(id);
-      if (current) await this.d.pods.put({ ...current, agents });
+      if (current) {
+        await this.d.pods.put({ ...current, agents });
+        this.publishPods();
+      }
     } catch (e) {
       this.log(`${id}: unreadable agents.json: ${msg(e)}`);
     }
+  }
+
+  /** Restart one agent in a pod (e.g. after `panem pod login`) and re-read its status. */
+  async restartAgent(id: string, agent: string): Promise<Pod> {
+    const pod = this.assertIdle(id);
+    if (!/^[A-Za-z0-9_-]+$/.test(agent) || !(pod.agents ?? []).some((a) => a.id === agent)) {
+      throw new HttpError(404, `pod ${id} has no agent ${agent}`);
+    }
+    if (pod.state !== "running") throw new HttpError(409, `pod ${id} isn't running`);
+    const r = await this.d.backend.exec(
+      id,
+      `PANEM_ONLY_AGENT=${agent} /usr/local/share/panem/post-start.sh`,
+    );
+    if (r.exitCode !== 0) this.log(`${id}: restarting ${agent} failed: ${r.stderr.trim()}`);
+    await this.recordAgents(id);
+    return this.get(id);
   }
 
   /** Where a pod's memory merge base is kept: the memory it was given at copy-in. */
@@ -930,6 +976,9 @@ export interface GitCheck {
   checked: boolean;
   problems: GitProblem[];
 }
+
+/** Separates agents.json from the status lines in recordAgents' output. */
+const STATUS_MARK = "---panem-agent-status---";
 
 const REASON_LABEL: Record<GitProblem["reason"], string> = {
   url: "bad URL",
