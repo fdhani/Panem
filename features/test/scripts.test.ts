@@ -296,7 +296,12 @@ describe("vendored base", () => {
   });
 });
 
-describe("install scripts", () => {
+// install.sh apt-gets missing packages, which needs root. Elsewhere, run these tests only when
+// everything it would install is already there.
+const canInstall =
+  process.getuid?.() === 0 || ["git", "tmux", "jq", "curl", "socat"].every((b) => Bun.which(b));
+
+describe.skipIf(!canInstall)("install scripts", () => {
   const install = (
     feature: string,
     share: string,
