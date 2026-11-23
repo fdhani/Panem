@@ -4,7 +4,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { PanemConfig, type WorkspaceHookName } from "@panem/core";
 import { derivedConfig } from "./devcontainer-config";
 import { Mutex } from "./git";
-import { featuresHash, panemFeatures } from "./machine-assets";
+import { featuresHash, panemFeatures, shippedAgents } from "./machine-assets";
 
 /** One Docker volume per machine for agents' shared sign-ins (agent.json "login.share"). */
 export const LOGINS_MOUNT = {
@@ -15,17 +15,7 @@ export const LOGINS_MOUNT = {
 
 /** Whether any of these shipped agents keeps its sign-in in the machine's volume. */
 async function sharesLogins(ids: string[]): Promise<boolean> {
-  for (const f of await panemFeatures()) {
-    const m = /^([^/]+)\/agent\/agent\.json$/.exec(f.path);
-    if (!m || !ids.includes(m[1]!)) continue;
-    try {
-      const a = JSON.parse(new TextDecoder().decode(f.data)) as { login?: { share?: string[] } };
-      if (a.login?.share?.length) return true;
-    } catch {
-      // not ours to judge here
-    }
-  }
-  return false;
+  return (await shippedAgents()).some((a) => ids.includes(a.id) && !!a.login?.share?.length);
 }
 
 /** Folder next to a template's devcontainer.json where Panem keeps its Features up to date. */

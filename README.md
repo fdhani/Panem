@@ -113,10 +113,11 @@ Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.pan
 
 **Remote Control needs a claude.ai sign-in.** The token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`) only covers model requests; Anthropic's docs say it "can't establish Remote Control sessions". Pods keep it for that, but Remote Control is started without it, because it would take precedence over a sign-in.
 
-**Sign in once per machine,** from the web UI: **Machines → <machine> → Sign in** next to the agent. Or from a terminal on the controller:
+**Sign in once per machine,** from the web UI: the **Machines** page lists, under each machine, every agent you can sign in to and whether it's signed in there; press **Sign in** next to it. Or from a terminal on the controller (`panem machine login` and `panem pod login` still work as older names):
 ```bash
-panem machine login <machine> [agent]   # from elsewhere: ssh -t <controller> panem machine login <machine>
-panem pod login <pod-id> [agent]        # the same, in a pod you choose
+panem agent-login                            # what you can sign in to, on each machine
+panem agent-login <machine> [agent]          # sign in; from elsewhere: ssh -t <controller> panem agent-login <machine>
+panem agent-login --pod <pod-id> [agent]     # sign in one pod only (one that can't use the machine's sign-in)
 ```
 - It runs the agent's own sign-in in a pod on that machine (for Claude Code, `claude auth login`): open the link it prints, sign in, and paste the code back. In the UI this happens in a terminal in the page; Panem passes the terminal through and never reads or keeps what's typed or shown.
 - The login is kept in a Docker volume on that machine (`panem-logins`). When the sign-in finishes, the agent restarts in every running pod there that was waiting for one, and new pods start signed in. Pods where it already runs are left alone.

@@ -43,6 +43,8 @@ const agentState = (ctl: Ctl, id: string) =>
   ctl.service.get(id).agents?.find((a) => a.id === "codex")?.status?.state;
 const machine = (ctl: Ctl, name: string) =>
   ctl.service.machines().find((m) => m.name === name) as Machine;
+const codexOn = (ctl: Ctl, name: string) =>
+  machine(ctl, name).logins?.find((l) => l.agent === "codex");
 
 /** Open the sign-in terminal, type `input` once it asks, and collect what happens. */
 async function signIn(base: string, ticket: string, input: string) {
@@ -121,6 +123,21 @@ describe("machine sign-ins, worked out from pods (any agent)", () => {
 });
 
 describe("signing in from the UI", () => {
+  test("every machine lists the agents Panem ships with a sign-in, pods or not", async () => {
+    const { ctl } = await setup();
+    for (const m of ["m-vps", "m-mac"]) {
+      expect(machine(ctl, m).logins).toEqual([
+        {
+          agent: "claude-code",
+          label: "Claude Code",
+          loginLabel: "Sign in to Claude",
+          state: "no-pods",
+          pods: [],
+        },
+      ]);
+    }
+  });
+
   test("no running pod with the agent: a clear 409", async () => {
     const { ctl } = await setup();
     const r = await ctl.req("POST", "/api/machines/m-vps/logins/codex", {});
@@ -144,7 +161,7 @@ describe("signing in from the UI", () => {
     const a = await summon(ctl);
     const b = await summon(ctl);
     const elsewhere = await summon(ctl, "m-mac");
-    expect(machine(ctl, "m-vps").logins?.[0]?.state).toBe("needs-sign-in");
+    expect(codexOn(ctl, "m-vps")?.state).toBe("needs-sign-in");
 
     const res = await ctl.req("POST", "/api/machines/m-vps/logins/codex", {});
     expect(res.status).toBe(201);
@@ -166,8 +183,8 @@ describe("signing in from the UI", () => {
     expect(agentState(ctl, a.id)).toBe("running");
     expect(agentState(ctl, b.id)).toBe("running");
     expect(agentState(ctl, elsewhere.id)).toBe("needs-login");
-    expect(machine(ctl, "m-vps").logins?.[0]?.state).toBe("signed-in");
-    expect(machine(ctl, "m-mac").logins?.[0]?.state).toBe("needs-sign-in");
+    expect(codexOn(ctl, "m-vps")?.state).toBe("signed-in");
+    expect(codexOn(ctl, "m-mac")?.state).toBe("needs-sign-in");
     expect(ctl.service.logins.inProgress()).toEqual([]);
 
     // A pod summoned afterwards starts signed in.

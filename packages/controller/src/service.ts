@@ -40,6 +40,7 @@ import {
   redact,
 } from "./git-access";
 import { LoginSessions } from "./logins";
+import { shippedAgents } from "./machine-assets";
 import { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";
 import type { HostProbe } from "./probe";
 import type { Sources } from "./sources";
@@ -287,11 +288,24 @@ export class PodService {
     }
   }
 
-  /** Machines, each with its agents' sign-ins (worked out from its pods). */
+  /** Agents Panem ships (their agent.json), loaded once by loadShippedAgents(). */
+  private shipped: AgentInfo[] = [];
+
+  async loadShippedAgents(): Promise<void> {
+    this.shipped = await shippedAgents().catch((e) => {
+      this.log(`couldn't read the shipped agents: ${msg(e)}`);
+      return [];
+    });
+  }
+
+  /**
+   * Machines, each with its agents' sign-ins (worked out from its pods). Agents Panem ships with
+   * a sign-in are listed on every machine, so people see what they can sign in to.
+   */
   machines(): Machine[] {
     const pods = this.podList();
     return this.machineCache.map((m) => {
-      const logins = machineLogins(m.name, pods);
+      const logins = machineLogins(m.name, pods, this.shipped);
       return logins.length ? { ...m, logins } : m;
     });
   }
@@ -756,7 +770,7 @@ export class PodService {
     return new TextDecoder().decode(r.stdout);
   }
 
-  /** Restart one agent in a pod (e.g. after `panem pod login`) and re-read its status. */
+  /** Restart one agent in a pod (e.g. after a sign-in) and re-read its status. */
   async restartAgent(id: string, agent: string): Promise<Pod> {
     const pod = this.assertIdle(id);
     if (!/^[A-Za-z0-9_-]+$/.test(agent) || !(pod.agents ?? []).some((a) => a.id === agent)) {

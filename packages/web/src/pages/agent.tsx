@@ -100,8 +100,7 @@ export function AgentPage() {
           <p className="text-xs text-muted">
             Or on the controller:{" "}
             <code className="font-mono break-all">
-              panem {a.login.shared === false ? `pod login ${pod.id}` : `machine login ${where}`}{" "}
-              {a.id}
+              panem agent-login {a.login.shared === false ? `--pod ${pod.id}` : where} {a.id}
             </code>
           </p>
         </Card>

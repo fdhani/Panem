@@ -1,5 +1,6 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { AgentInfo } from "@panem/core";
 import { featureFiles, forwarderFile } from "./machine-assets.gen";
 
 /**
@@ -94,4 +95,26 @@ export async function readFeatures(src: string): Promise<FeatureFile[]> {
     }
   }
   return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * The agents Panem's Features ship (each <id>/agent/agent.json), as declared. Those with a
+ * "login" block are the ones a person can sign in to.
+ */
+export async function shippedAgents(): Promise<AgentInfo[]> {
+  const out: AgentInfo[] = [];
+  for (const f of await panemFeatures()) {
+    if (!/^[^/]+\/agent\/agent\.json$/.test(f.path)) continue;
+    const a = AgentInfo.safeParse(
+      (() => {
+        try {
+          return JSON.parse(new TextDecoder().decode(f.data));
+        } catch {
+          return undefined;
+        }
+      })(),
+    );
+    if (a.success) out.push(a.data);
+  }
+  return out;
 }

@@ -58,7 +58,7 @@ export const AgentInfo = z.object({
     .refine((p) => !p.includes(".."), "no ..")
     .optional(),
   /**
-   * The agent's own sign-in (run from the UI, `panem machine login` or `panem pod login`); its
+   * The agent's own sign-in (run from the UI or `panem agent-login`); its
    * files are shared per machine. `shared`/`reason`: whether this pod uses the machine's
    * sign-in, and why not (from ~/.panem/agents/<id>.login.json).
    */

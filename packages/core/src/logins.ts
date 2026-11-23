@@ -1,11 +1,29 @@
-import type { MachineLogin, Pod } from "./schemas";
+import type { AgentInfo, MachineLogin, Pod } from "./schemas";
 
 // Agents' sign-ins per machine, for any agent whose agent.json has a "login" block. Used by the
 // controller (machine state, where a sign-in runs) and the CLI.
 
-/** Each agent with a sign-in, on one machine, from that machine's pods. */
-export function machineLogins(machine: string, pods: Pod[]): MachineLogin[] {
+/**
+ * Each agent with a sign-in, on one machine, from that machine's pods. `known` agents (the ones
+ * Panem ships) are listed even when no pod there has them yet, so people see what they can
+ * sign in to.
+ */
+export function machineLogins(
+  machine: string,
+  pods: Pod[],
+  known: Pick<AgentInfo, "id" | "label" | "login">[] = [],
+): MachineLogin[] {
   const out = new Map<string, MachineLogin>();
+  for (const a of known) {
+    if (!a.login) continue;
+    out.set(a.id, {
+      agent: a.id,
+      label: a.label || a.id,
+      loginLabel: a.login.label,
+      state: "no-pods",
+      pods: [],
+    });
+  }
   for (const p of pods.filter((x) => x.machine === machine)) {
     for (const a of p.agents ?? []) {
       if (!a.login) continue;

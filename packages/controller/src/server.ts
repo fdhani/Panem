@@ -95,6 +95,7 @@ export async function createController(o: ControllerOptions) {
     ui: await loadUi(),
     log: o.log,
   });
+  await service.loadShippedAgents();
   return { app, service, backend, workspace, credentials };
 }
 
