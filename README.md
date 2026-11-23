@@ -113,7 +113,7 @@ Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.pan
 
 **Remote Control needs a claude.ai sign-in.** The token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`) only covers model requests; Anthropic's docs say it "can't establish Remote Control sessions". Pods keep it for that, but Remote Control is started without it, because it would take precedence over a sign-in.
 
-**Sign in once per machine,** from the web UI: the **Machines** page lists, under each machine, every agent you can sign in to and whether it's signed in there; press **Sign in** next to it. Or from a terminal on the controller (`panem machine login` and `panem pod login` still work as older names):
+**Sign in once per machine,** from the web UI: **Machines → <machine>** shows each agent you can sign in to, whether it's signed in on that machine, and how it's doing in each pod there; press its **Sign in to …** button. The Machines list flags agents waiting for a sign-in. Or from a terminal on the controller (`panem machine login` and `panem pod login` still work as older names):
 ```bash
 panem agent-login                            # what you can sign in to, on each machine
 panem agent-login <machine> [agent]          # sign in; from elsewhere: ssh -t <controller> panem agent-login <machine>

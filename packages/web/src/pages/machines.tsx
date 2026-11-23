@@ -1,14 +1,15 @@
-import type { ForwarderStatus } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
-import { Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { ChevronRight, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { AgentSignIns } from "../components/agent-logins";
+import { agentsNeedingSignIn } from "../components/agent-logins";
 import { MachineDot } from "../components/status";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { Field, Input } from "../components/ui/field";
 import { api, keys, queryClient, useMachines, usePods } from "../lib/api";
+import { ForwarderBadge } from "./machine";
 import { QueryError } from "./shared";
 
 export function MachinesPage() {
@@ -25,10 +26,6 @@ export function MachinesPage() {
       refresh();
     },
   });
-  const repair = useMutation({
-    mutationFn: (name: string) => api("POST", `/api/machines/${name}/repair`),
-    onSettled: refresh,
-  });
   const remove = useMutation({
     mutationFn: (name: string) => api("DELETE", `/api/machines/${name}`),
     onSettled: refresh,
@@ -44,35 +41,36 @@ export function MachinesPage() {
         )}
         {machines.data?.map((m) => {
           const count = pods.data?.filter((p) => p.machine === m.name).length ?? 0;
+          const waiting = agentsNeedingSignIn(m);
           return (
-            <div key={m.name} className="flex items-center gap-3 p-4">
-              <MachineDot status={m.status} />
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-medium">{m.name.replace(/^m-/, "")}</p>
-                <p className="truncate font-mono text-xs text-muted">
-                  {m.user ? `${m.user}@` : ""}
-                  {m.host} · {m.status} · {count} pod{count === 1 ? "" : "s"}
-                </p>
-                {m.forwarder && m.forwarder.status !== "disabled" && (
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    <ForwarderBadge f={m.forwarder} />
-                    {m.forwarder.status !== "running" && m.status !== "offline" && (
-                      <button
-                        type="button"
-                        className="inline-flex items-center gap-1 text-xs text-accent disabled:opacity-50"
-                        disabled={repair.isPending}
-                        onClick={() => repair.mutate(m.name)}
-                      >
-                        <RefreshCw className={`size-3 ${repair.isPending ? "animate-spin" : ""}`} />
-                        Repair
-                      </button>
-                    )}
-                  </div>
-                )}
-                {m.forwarder?.error && m.forwarder.status !== "running" && (
-                  <p className="mt-1 text-xs break-words text-bad">{m.forwarder.error}</p>
-                )}
-              </div>
+            <div key={m.name} className="flex items-center gap-1 pr-2">
+              <Link
+                to="/machines/$name"
+                params={{ name: m.name }}
+                className="flex min-w-0 flex-1 items-center gap-3 p-4 hover:bg-surface-2"
+              >
+                <MachineDot status={m.status} />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium">{m.name.replace(/^m-/, "")}</p>
+                  <p className="truncate font-mono text-xs text-muted">
+                    {m.user ? `${m.user}@` : ""}
+                    {m.host} · {m.status} · {count} pod{count === 1 ? "" : "s"}
+                  </p>
+                  {(waiting.length > 0 || (m.forwarder && m.forwarder.status !== "disabled")) && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      {m.forwarder && m.forwarder.status !== "disabled" && (
+                        <ForwarderBadge f={m.forwarder} />
+                      )}
+                      {waiting.map((l) => (
+                        <Badge key={l.agent} tone="warn">
+                          {l.label}: needs sign-in
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <ChevronRight className="size-4 shrink-0 text-muted" />
+              </Link>
               <Button
                 variant="ghost"
                 size="icon"
@@ -88,8 +86,6 @@ export function MachinesPage() {
         })}
       </Card>
       {remove.error && <p className="text-sm text-bad">{remove.error.message}</p>}
-      {machines.data && <AgentSignIns machines={machines.data} />}
-      {repair.error && <p className="text-sm text-bad">{repair.error.message}</p>}
 
       <form
         onSubmit={(e) => {
@@ -134,17 +130,4 @@ export function MachinesPage() {
       </form>
     </div>
   );
-}
-
-function ForwarderBadge({ f }: { f: ForwarderStatus }) {
-  const tone = f.status === "running" ? "ok" : f.status === "outdated" ? "warn" : "bad";
-  const text =
-    f.status === "running"
-      ? "ports exposed"
-      : f.status === "outdated"
-        ? "forwarder outdated"
-        : f.status === "missing"
-          ? "forwarder not responding"
-          : "forwarder error";
-  return <Badge tone={tone}>{text}</Badge>;
 }

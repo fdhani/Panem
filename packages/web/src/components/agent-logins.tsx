@@ -1,95 +1,111 @@
-import type { Machine, MachineLogin } from "@panem/core";
-import { KeyRound } from "lucide-react";
+import type { Machine, MachineLogin, Pod } from "@panem/core";
+import { Link } from "@tanstack/react-router";
+import { ChevronRight } from "lucide-react";
 import { LOGIN_STATE, machineLabel } from "../lib/agent-login";
+import { AGENT_STATE } from "../lib/agent-state";
 import { SignInButton } from "./sign-in";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
 
-interface AgentRow {
-  machine: Machine;
-  login: MachineLogin;
-}
-
-/** Machines' sign-ins regrouped per agent: each agent signs in on its own, once per machine. */
-function byAgent(machines: Machine[]) {
-  const out = new Map<string, { label: string; loginLabel: string; rows: AgentRow[] }>();
-  for (const m of machines) {
-    for (const l of m.logins ?? []) {
-      const a = out.get(l.agent) ?? { label: l.label, loginLabel: l.loginLabel, rows: [] };
-      a.rows.push({ machine: m, login: l });
-      out.set(l.agent, a);
-    }
-  }
-  return [...out.entries()];
+/** Agents on a machine that wait for a sign-in (for a compact hint in lists). */
+export function agentsNeedingSignIn(m: Machine): MachineLogin[] {
+  return (m.logins ?? []).filter((l) => l.state === "needs-sign-in");
 }
 
 /**
- * Agent sign-ins, one block per agent (any agent with a sign-in): where it's signed in, and a
- * button that signs it in on a machine.
+ * A machine's agents, one card per agent (any agent with a sign-in): its sign-in on this
+ * machine, a button to sign it in, and how it's doing in each of the machine's pods.
  */
-export function AgentSignIns({ machines }: { machines: Machine[] }) {
-  const agents = byAgent(machines);
-  if (agents.length === 0) return null;
+export function MachineAgents({ machine, pods }: { machine: Machine; pods: Pod[] }) {
+  const logins = machine.logins ?? [];
+  if (logins.length === 0) {
+    return <p className="text-sm text-muted">No agents with a sign-in on this machine.</p>;
+  }
   return (
-    <Card className="flex flex-col gap-4 p-4">
-      <div>
-        <h2 className="flex items-center gap-2 font-medium">
-          <KeyRound className="size-4 text-muted" /> Agent sign-ins
-        </h2>
-        <p className="mt-1 text-xs text-muted">
-          Each agent signs in with its own account, once per machine; every pod on that machine then
-          uses it. Sign-ins aren't copied between machines.
-        </p>
-      </div>
-      {agents.map(([id, a]) => (
-        <section key={id} className="flex flex-col gap-2" aria-label={a.label}>
-          <h3 className="text-sm font-medium">{a.label}</h3>
-          <ul className="flex flex-col divide-y divide-border rounded-lg border border-border">
-            {a.rows.map((r) => (
-              <AgentMachineRow key={r.machine.name} row={r} loginLabel={a.loginLabel} />
-            ))}
-          </ul>
-        </section>
+    <div className="flex flex-col gap-3">
+      {logins.map((l) => (
+        <AgentCard key={l.agent} machine={machine} login={l} pods={pods} />
       ))}
-    </Card>
+    </div>
   );
 }
 
-function AgentMachineRow({ row, loginLabel }: { row: AgentRow; loginLabel: string }) {
-  const { machine, login } = row;
+function AgentCard({
+  machine,
+  login,
+  pods,
+}: {
+  machine: Machine;
+  login: MachineLogin;
+  pods: Pod[];
+}) {
   const st = LOGIN_STATE[login.state];
   const where = machineLabel(machine.name);
-  const own = login.pods.filter((p) => p.shared === false);
   const canSignIn = login.state !== "no-pods" && machine.status !== "offline";
+  // Every pod here that has this agent, running or not, with the agent's own state.
+  const withAgent = pods
+    .filter((p) => p.machine === machine.name)
+    .flatMap((p) => {
+      const a = p.agents?.find((x) => x.id === login.agent);
+      return a ? [{ pod: p, agent: a }] : [];
+    });
   return (
-    <li className="flex flex-col gap-1 px-3 py-2.5">
+    <Card className="flex flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-        <span className="font-mono text-sm">{where}</span>
+        <h3 className="font-medium">{login.label}</h3>
         <Badge tone={st.tone}>{st.label}</Badge>
         {canSignIn && (
           <span className="ml-auto">
             <SignInButton
-              scope={{ machine: machine.name, agent: login.agent, label: loginLabel }}
+              scope={{ machine: machine.name, agent: login.agent, label: login.loginLabel }}
               variant={login.state === "signed-in" ? "ghost" : "primary"}
-              title={`${loginLabel} on ${where}, for every pod there`}
+              title={`${login.loginLabel} on ${where}, for every pod there`}
             >
-              {login.state === "signed-in" ? "Sign in again" : loginLabel}
+              {login.state === "signed-in" ? "Sign in again" : login.loginLabel}
             </SignInButton>
           </span>
         )}
       </div>
-      {login.state === "no-pods" && (
-        <p className="text-xs text-muted">Summon a pod on {where} to sign in from.</p>
+      <p className="text-xs text-muted">
+        {login.state === "no-pods"
+          ? `Summon a pod on ${where} to sign ${login.label} in from. One sign-in then serves every pod here.`
+          : `${login.label} signs in with its own account, once for ${where}: every pod here uses it. It isn't copied to other machines.`}
+        {machine.status === "offline" && ` ${where} is offline.`}
+      </p>
+      {withAgent.length > 0 && (
+        <ul className="flex flex-col divide-y divide-border rounded-lg border border-border">
+          {withAgent.map(({ pod, agent }) => {
+            const ast = agent.status ? AGENT_STATE[agent.status.state] : undefined;
+            const own = agent.login?.shared === false;
+            return (
+              <li key={pod.id}>
+                <Link
+                  to="/pods/$id/agents/$agent"
+                  params={{ id: pod.id, agent: agent.id }}
+                  className="flex flex-col gap-1 px-3 py-2.5 hover:bg-surface-2"
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm">{pod.id}</span>
+                    {pod.state !== "running" ? (
+                      <Badge>{pod.state}</Badge>
+                    ) : ast ? (
+                      <Badge tone={ast.tone}>{ast.label}</Badge>
+                    ) : (
+                      <Badge>Unknown</Badge>
+                    )}
+                    <ChevronRight className="size-4 shrink-0 text-muted" />
+                  </span>
+                  {own && (
+                    <span className="text-xs break-words text-warn">
+                      Can't use {where}'s sign-in: {agent.login?.reason ?? "see its page"}
+                    </span>
+                  )}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
       )}
-      {machine.status === "offline" && login.state !== "no-pods" && (
-        <p className="text-xs text-muted">{where} is offline.</p>
-      )}
-      {own.length > 0 && (
-        <p className="text-xs break-words text-warn">
-          {own.length === 1 ? "1 pod" : `${own.length} pods`} can't use this sign-in:{" "}
-          {own[0]!.reason ?? "see the pod's agent page"}
-        </p>
-      )}
-    </li>
+    </Card>
   );
 }
