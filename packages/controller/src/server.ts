@@ -4,6 +4,7 @@ import { type Config, type PodBackend, dataDir as defaultDataDir, loadConfig } f
 import { createApp } from "./api";
 import { Credentials } from "./credentials";
 import { ForwarderManager, type Forwarders } from "./forwarders";
+import { GitAccess } from "./git-access";
 import { MockBackend, MockForwarders } from "./mock-backend";
 import { type HostProbe, StaticProbe, TailscaleProbe, tailscaleIPv4 } from "./probe";
 import { PodService } from "./service";
@@ -22,6 +23,8 @@ export interface ControllerOptions {
   forwarders?: Forwarders;
   /** Where the config came from, to pick up credential changes without a restart. */
   configPath?: string;
+  /** Git access for pods; default: real (DevPod), none (mock backend). Tests inject their own. */
+  git?: GitAccess | null;
   /** Time limit per before-destroy hook, in seconds (tests). */
   hookTimeoutSec?: number;
   /** Time limit per workspace hook (panem.json "hooks"), in seconds (default 120; tests). */
@@ -55,6 +58,11 @@ export async function createController(o: ControllerOptions) {
     backend,
     workspace,
     dataDir: dir,
+    // Mock pods clone nothing real; DevPod pods get managed git access.
+    git:
+      o.git === null
+        ? undefined
+        : (o.git ?? (backend instanceof DevPodBackend ? new GitAccess() : undefined)),
     templates,
     probe,
     pods: await PodStore.open(dir),
@@ -91,6 +99,18 @@ async function seededMock(): Promise<MockBackend> {
 
 export async function serve(config: Config, configPath?: string) {
   const { app, service, backend } = await createController({ config, configPath });
+  if (backend instanceof DevPodBackend) {
+    // Panem scopes git access itself: stop DevPod adding all ~/.ssh keys to forwarded agents
+    // and forwarding the controller's git credential store to pods.
+    await backend
+      .configureContext()
+      .then(() =>
+        console.log(
+          "[panem] DevPod context: SSH_ADD_PRIVATE_KEYS=false, SSH_INJECT_GIT_CREDENTIALS=false",
+        ),
+      )
+      .catch((e) => console.warn(`[panem] could not set DevPod context options: ${e}`));
+  }
   if (backend instanceof DevPodBackend) {
     try {
       const v = await backend.version();

@@ -77,6 +77,21 @@ export const keys = {
   workspace: ["workspace"] as const,
 };
 
+export interface GitCheck {
+  checked: boolean;
+  problems: { repo: string; url: string; reason: string; message: string }[];
+}
+
+/** Whether a template's repos are reachable with what its pods will get (cached server-side). */
+export const useGitCheck = (template: string) =>
+  useQuery({
+    queryKey: ["git-check", template],
+    queryFn: () => api<GitCheck>("GET", `/api/templates/${encodeURIComponent(template)}/git-check`),
+    enabled: !!template,
+    staleTime: 60_000,
+    retry: false,
+  });
+
 /** The controller's workspace folder (undefined until `panem workspace init`). */
 export const useWorkspace = () =>
   useQuery({

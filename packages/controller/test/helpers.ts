@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Config, saveConfig } from "@panem/core";
 import type { Forwarders } from "../src/forwarders";
+import type { GitAccess } from "../src/git-access";
 import { MockBackend } from "../src/mock-backend";
 import { StaticProbe } from "../src/probe";
 import { createController } from "../src/server";
@@ -68,6 +69,8 @@ export async function makeController(opts: {
   workspaceHookTimeoutSec?: number;
   /** Keep the config in this file (written here, 0600), as `panem serve` does. */
   configPath?: string;
+  /** Managed git access (see git-fixtures.ts); default none, like mock mode. */
+  git?: GitAccess;
 }) {
   const backend = new MockBackend();
   await backend.addMachine({ name: "m-vps", host: "vps" });
@@ -98,6 +101,7 @@ export async function makeController(opts: {
     forwarders: opts.forwarders ?? noForwarders,
     hookTimeoutSec: opts.hookTimeoutSec,
     workspaceHookTimeoutSec: opts.workspaceHookTimeoutSec,
+    git: opts.git,
     log: (m) => logs.push(m),
   });
   await ctl.service.refresh();

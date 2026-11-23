@@ -1,6 +1,6 @@
 {
   "id": "claude-code",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "name": "Claude Code (Panem agent)",
   "description": "Claude Code as a Panem agent: installs Claude Code, trusts the pod's repos, and keeps a Remote Control session running (open it in the Claude app). Brings the Panem pod base along if the template doesn't list it.",
   "documentationURL": "https://github.com/fdhani/panem/tree/main/features",

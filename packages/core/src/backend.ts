@@ -20,6 +20,21 @@ export interface UpOptions {
   sourceRef?: string;
   devcontainerPath: string;
   env: Record<string, string>;
+  /**
+   * Files to place in the pod before its one-time setup runs (e.g. git host keys and the git
+   * token file). Paths start with "~/" (the pod user's home). Sent over stdin, never argv/env.
+   */
+  files?: PodFile[];
+  /** An ssh-agent socket on the controller to forward into the setup session (git over SSH). */
+  sshAuthSock?: string;
+}
+
+export interface PodFile {
+  /** "~/..." in the pod. */
+  path: string;
+  content: string;
+  /** Octal mode, e.g. 0o600. */
+  mode: number;
 }
 
 export interface ExecResult {
@@ -38,7 +53,7 @@ export interface PodBackend {
   start(id: string): Promise<void>;
   stop(id: string): Promise<void>;
   delete(id: string, opts?: { force?: boolean }): Promise<void>;
-  exec(id: string, command: string): Promise<ExecResult>;
+  exec(id: string, command: string, opts?: { sshAuthSock?: string }): Promise<ExecResult>;
   /** Run `command` in the pod with `data` on its stdin (e.g. a tar to unpack). */
   upload(id: string, data: Uint8Array, command: string): Promise<ExecResult>;
   /**

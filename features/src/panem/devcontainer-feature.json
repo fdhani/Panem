@@ -1,6 +1,6 @@
 {
   "id": "panem",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "name": "Panem pod base",
   "description": "The agent-agnostic part of a Panem pod: clones the pod's repos into /codebase, keeps Panem's state in ~/.panem, runs the port relay, and runs the setup and start hooks of every agent Feature installed alongside it (e.g. claude-code).",
   "documentationURL": "https://github.com/fdhani/panem/tree/main/features",

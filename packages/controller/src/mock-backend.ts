@@ -103,6 +103,13 @@ export class MockBackend implements PodBackend {
     }
     mkdirSync(join(this.home(o.id), ".panem"), { recursive: true });
     mkdirSync(this.agentsDir(o.id), { recursive: true });
+    // Files the controller places before setup (git host keys, the git token file).
+    for (const f of o.files ?? []) {
+      const p = join(this.home(o.id), f.path.replace(/^~\//, ""));
+      mkdirSync(join(p, ".."), { recursive: true });
+      writeFileSync(p, f.content, { mode: f.mode });
+    }
+    if (o.sshAuthSock) this.events.push(`agent:${o.id}`);
     writeFileSync(join(this.home(o.id), ".panem/pod.json"), o.env.PANEM_POD ?? "{}");
     if (this.agentsJson !== undefined) {
       writeFileSync(join(this.home(o.id), ".panem/agents.json"), this.agentsJson);
@@ -156,8 +163,16 @@ export class MockBackend implements PodBackend {
     return { exitCode, stdout, stderr };
   }
 
-  async exec(id: string, command: string): Promise<ExecResult> {
+  /** sshAuthSock each exec was given (by command kind), for tests. */
+  execAgents: { id: string; kind: string; sshAuthSock?: string }[] = [];
+
+  async exec(id: string, command: string, opts?: { sshAuthSock?: string }): Promise<ExecResult> {
     await this.step("exec");
+    this.execAgents.push({
+      id,
+      kind: command.includes("panem-before-destroy") ? "before-destroy" : "other",
+      sshAuthSock: opts?.sshAuthSock,
+    });
     if (command.includes("panem-before-destroy")) this.events.push(`before-destroy:${id}`);
     if (command.includes("panem-export")) this.events.push(`save-memory:${id}`);
     return this.run(id, command);
