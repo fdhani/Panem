@@ -24,7 +24,7 @@ A template lists one or more agents. Listing `panem` too is optional. Panem writ
 | Hook | Script | What it does |
 | --- | --- | --- |
 | install | `install.sh` | git, tmux, jq, curl, socat; `/codebase` (sticky, world-writable); scripts in `/usr/local/share/panem/` |
-| postCreateCommand | `post-create.sh` | Clones `PANEM_POD.repos` into `/codebase/<repo>` at their refs; writes `~/.panem/pod.json`; saves the credentials named in `PANEM_AGENT_ENV`, plus the relay secret, to `~/.config/panem/env` (0600); runs every agent's `setup.sh`; writes `~/.panem/agents.json` |
+| postCreateCommand | `post-create.sh` | Applies the git access the controller placed in `~/.panem/git/` (host keys into `~/.ssh/known_hosts`, an `Include` of the alias config at the top of `~/.ssh/config`, and `git-credential-panem.sh` as the credential helper for HTTPS token hosts). Then clones `PANEM_POD.repos` into `/codebase/<repo>` at their refs; writes `~/.panem/pod.json`; saves the credentials named in `PANEM_AGENT_ENV`, plus the relay secret, to `~/.config/panem/env` (0600); runs every agent's `setup.sh`; writes `~/.panem/agents.json` |
 | postStartCommand | `post-start.sh` | Starts the port relay (tmux `panem-relay`), then every agent's `start.sh`. One agent failing doesn't stop the others. |
 
 The base doesn't copy CLAUDE.md, skills or memory. The controller copies synced files in, following the workspace folder's `panem.json`, between `post-create` and `post-start`.
@@ -34,6 +34,10 @@ DevPod (v0.6.x) doesn't run lifecycle hooks declared by Features, so Panem runs 
 - after each start: `post-start.sh`.
 
 Both are idempotent.
+
+**Clone errors:** a failed clone stops setup with one line, `panem: clone of <repo> (<url>) at <ref> failed: <git's message>`, which the controller shows as the pod's error. Clones never prompt (`GIT_TERMINAL_PROMPT=0`).
+
+**Git token helper** (`git-credential-panem.sh`): answers `get` for the HTTPS hosts listed in `~/.config/panem/git-tokens` (0600, `<host> <username> <token>`), and nothing else. It's the only place a git token lives in a pod.
 
 **Port relay:** `socat` on container port 7699, never published. The machine's `panem-forwarder` sends one line, `<secret> <cmd>`:
 - `list`: the ports listening right now;

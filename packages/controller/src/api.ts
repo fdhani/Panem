@@ -99,6 +99,9 @@ export function createApp(d: ApiDeps): Hono {
   );
 
   app.get("/api/workspace", async (c) => c.json({ dir: await d.workspace.current() }));
+  app.get("/api/templates/:name/git-check", async (c) =>
+    c.json(await service.gitCheck(c.req.param("name"))),
+  );
   app.get("/api/templates", async (c) => c.json(await d.templates.list()));
 
   app.get("/api/pods", (c) => c.json(service.podList()));

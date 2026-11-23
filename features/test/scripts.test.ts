@@ -356,3 +356,102 @@ describe("install scripts", () => {
     expect(readFileSync(join(share, "VERSION"), "utf8").trim()).toBe("99.0.0");
   });
 });
+
+describe("base: git access", () => {
+  const TOKEN = "glpat-never-leak-42";
+
+  /** The files the controller places in the pod's home before setup (see git-access.ts). */
+  function withGitFiles(p: ReturnType<typeof pod>) {
+    const w = (rel: string, content: string, mode = 0o644) => {
+      mkdirSync(join(p.home, rel, ".."), { recursive: true });
+      writeFileSync(join(p.home, rel), content, { mode });
+    };
+    w(".panem/git/known_hosts", "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGitlabKey\n");
+    w(".panem/git/ssh_config", "Host gitlab-work\n  HostName gitlab.com\n  Port 22\n  User git\n");
+    w(".panem/git/https-hosts", "git.test oauth2\n");
+    w(".config/panem/git-tokens", `git.test oauth2 ${TOKEN}\n`, 0o600);
+  }
+
+  test("host keys, aliases and the HTTPS helper are applied, once", () => {
+    const p = pod();
+    withGitFiles(p);
+    p.run("post-create.sh", env);
+    p.run("post-create.sh", env);
+    const kh = readFileSync(join(p.home, ".ssh/known_hosts"), "utf8");
+    expect(kh.match(/GitlabKey/g)).toHaveLength(1);
+    const cfg = readFileSync(join(p.home, ".ssh/config"), "utf8").split("\n");
+    expect(cfg[0]).toBe(`Include ${join(p.home, ".panem/git/ssh_config")}`);
+    expect(cfg.filter((l) => l.startsWith("Include"))).toHaveLength(1);
+    const gitconfig = readFileSync(join(p.home, ".gitconfig"), "utf8");
+    expect(gitconfig).toContain('[credential "https://git.test"]');
+    expect(gitconfig).toContain(`helper = ${join(p.share, "git-credential-panem.sh")}`);
+    expect(gitconfig).toContain("username = oauth2");
+    expect(gitconfig).not.toContain(TOKEN);
+  });
+
+  test("the credential helper answers only for its own HTTPS host", () => {
+    const p = pod();
+    withGitFiles(p);
+    const ask = (input: string, op = "get") =>
+      Bun.spawnSync(["bash", join(p.share, "git-credential-panem.sh"), op], {
+        env: { PATH: process.env.PATH!, HOME: p.home },
+        stdin: new TextEncoder().encode(input),
+      }).stdout.toString();
+    expect(ask("protocol=https\nhost=git.test\n\n")).toBe(`username=oauth2\npassword=${TOKEN}\n`);
+    expect(ask("protocol=https\nhost=github.com\n\n")).toBe("");
+    expect(ask("protocol=http\nhost=git.test\n\n")).toBe("");
+    expect(ask("protocol=https\nhost=git.test\n\n", "store")).toBe("");
+  });
+
+  test("a failed clone names the repo and keeps git's message; no half-made repo is left", () => {
+    const p = pod();
+    const missing = join(root, "src", "does-not-exist");
+    const r = p.run(
+      "post-create.sh",
+      {
+        ...env,
+        PANEM_POD: JSON.stringify({
+          id: POD_ID,
+          repos: [{ name: "api", url: missing, ref: "main" }],
+        }),
+      },
+      false,
+    );
+    expect(r.code).not.toBe(0);
+    const out = r.out + r.err;
+    expect(out).toContain(`panem: clone of api (${missing}) at main failed:`);
+    expect(out).toMatch(/does not exist|not a git repository|repository .* does not exist/i);
+    expect(existsSync(join(p.code, "api"))).toBe(false);
+  });
+
+  test("a missing ref is reported the same way", () => {
+    const p = pod();
+    const r = p.run(
+      "post-create.sh",
+      {
+        ...env,
+        PANEM_POD: JSON.stringify({
+          id: POD_ID,
+          repos: [{ name: "api", url: makeRepo("refless"), ref: "no-such-branch" }],
+        }),
+      },
+      false,
+    );
+    expect(r.code).not.toBe(0);
+    expect(r.out + r.err).toContain("panem: clone of api");
+    expect(r.out + r.err).toContain("no-such-branch");
+  });
+
+  test("the token is in the helper's file and nowhere else in the pod", () => {
+    const p = pod();
+    withGitFiles(p);
+    const r = p.run("post-create.sh", env);
+    expect(r.out + r.err).not.toContain(TOKEN);
+    const hits = Bun.spawnSync(["grep", "-rl", "--", TOKEN, p.dir])
+      .stdout.toString()
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    expect(hits).toEqual([join(p.home, ".config/panem/git-tokens")]);
+  });
+});

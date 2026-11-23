@@ -1,7 +1,14 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BackendMachine, BackendPod, ExecResult, PodBackend, UpOptions } from "@panem/core";
+import type {
+  BackendMachine,
+  BackendPod,
+  ExecResult,
+  PodBackend,
+  PodFile,
+  UpOptions,
+} from "@panem/core";
 import { BackendError, LEGACY_POD_STATE_DIR } from "@panem/core";
 import { run, text } from "./run";
 
@@ -38,6 +45,19 @@ export function stdinUploadScript(len: number, command: string): string {
   ].join("; ");
 }
 
+/**
+ * DevPod context options Panem needs (see README "Private repos"). By default DevPod adds every
+ * private key in ~/.ssh to whatever agent it forwards, and forwards the controller's git
+ * credential store to pods for any host. Panem gives pods scoped git access itself instead.
+ */
+export const CONTEXT_OPTIONS = {
+  SSH_ADD_PRIVATE_KEYS: "false",
+  SSH_INJECT_GIT_CREDENTIALS: "false",
+} as const;
+
+/** `devpod ssh` flags for every Panem session: no DevPod credential helper or port forwarding. */
+const SSH_FLAGS = ["--start-services=false"];
+
 /** Provider names the controller owns. Other DevPod providers are left alone. */
 export const MACHINE_PREFIX = "m-";
 /** Host value that registers the controller's own Docker daemon instead of an SSH host. */
@@ -64,8 +84,32 @@ export class DevPodBackend implements PodBackend {
     this.statusTimeoutMs = opts.statusTimeoutMs ?? 20_000;
   }
 
-  private run(args: string[], timeoutMs?: number, check = true, stdin?: Uint8Array) {
-    return run(this.bin, args, { env: this.env, timeoutMs, check, stdin });
+  /**
+   * Every devpod call. SSH_AUTH_SOCK is blank unless Panem lends a scoped agent for this call,
+   * so an agent in the controller's own environment is never forwarded into a pod.
+   */
+  private run(
+    args: string[],
+    timeoutMs?: number,
+    check = true,
+    stdin?: Uint8Array,
+    sshAuthSock?: string,
+  ) {
+    return run(this.bin, args, {
+      env: { ...this.env, SSH_AUTH_SOCK: sshAuthSock ?? "" },
+      timeoutMs,
+      check,
+      stdin,
+    });
+  }
+
+  /** Set the DevPod context options Panem relies on (idempotent; run once at startup). */
+  async configureContext(): Promise<void> {
+    await this.run([
+      "context",
+      "set-options",
+      ...Object.entries(CONTEXT_OPTIONS).flatMap(([k, v]) => ["-o", `${k}=${v}`]),
+    ]);
   }
 
   /** Returns the installed version and whether it matches the pinned one. */
@@ -111,7 +155,37 @@ export class DevPodBackend implements PodBackend {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-    await this.lifecycle(o.id, "create");
+    // Git host keys, aliases and the token file: in place before the clone runs.
+    if (o.files?.length) await this.placeFiles(o.id, o.files);
+    await this.lifecycle(o.id, "create", o.sshAuthSock);
+  }
+
+  /** Put files under the pod user's home, over stdin (never argv or env), keeping their modes. */
+  private async placeFiles(id: string, files: PodFile[]): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "panem-files-"));
+    try {
+      for (const f of files) {
+        if (!f.path.startsWith("~/") || f.path.includes("..")) {
+          throw new BackendError(`pod file path must be under ~/: ${f.path}`);
+        }
+        const p = join(dir, f.path.slice(2));
+        await mkdir(join(p, ".."), { recursive: true });
+        await writeFile(p, f.content, { mode: f.mode });
+        await chmod(p, f.mode);
+      }
+      const tar = Bun.spawnSync(["tar", "-czf", "-", "-C", dir, "."], { stderr: "pipe" });
+      if (tar.exitCode !== 0) throw new BackendError(`packing pod files: ${tar.stderr}`);
+      const r = await this.upload(
+        id,
+        tar.stdout,
+        'umask 077; tar -xzpf - -C "$HOME" --no-same-owner --no-overwrite-dir',
+      );
+      if (r.exitCode !== 0) {
+        throw new BackendError(`placing files in ${id} failed: ${r.stderr.trim()}`, r.stderr);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 
   /**
@@ -120,13 +194,23 @@ export class DevPodBackend implements PodBackend {
    * idempotent, so this is also safe where the hooks did run (e.g. the devcontainer CLI).
    * Pods built without the Feature are left alone.
    */
-  private async lifecycle(id: string, phase: "create" | "start"): Promise<void> {
+  private async lifecycle(
+    id: string,
+    phase: "create" | "start",
+    sshAuthSock?: string,
+  ): Promise<void> {
     const cmd = phase === "create" ? BOOTSTRAP_CREATE : BOOTSTRAP_START;
-    const r = await this.run(["ssh", id, "--command", cmd], 15 * 60_000, false);
+    const r = await this.run(
+      ["ssh", id, ...SSH_FLAGS, "--command", cmd],
+      15 * 60_000,
+      false,
+      undefined,
+      sshAuthSock,
+    );
     if (r.exitCode !== 0) {
       const out = `${text(r.stdout)}\n${r.stderr}`.trim();
       throw new BackendError(
-        `pod ${phase === "create" ? "setup" : "start hook"} failed: ${out.split("\n").slice(-5).join(" | ")}`,
+        `pod ${phase === "create" ? "setup" : "start hook"} failed: ${failureSummary(out)}`,
         r.stderr,
         r.exitCode,
       );
@@ -171,9 +255,15 @@ export class DevPodBackend implements PodBackend {
     await this.run(args, 10 * 60_000);
   }
 
-  async exec(id: string, command: string): Promise<ExecResult> {
+  async exec(id: string, command: string, opts?: { sshAuthSock?: string }): Promise<ExecResult> {
     // Long enough for before-destroy hooks (each has its own, shorter limit in the pod).
-    const res = await this.run(["ssh", id, "--command", command], 30 * 60_000, false);
+    const res = await this.run(
+      ["ssh", id, ...SSH_FLAGS, "--command", command],
+      30 * 60_000,
+      false,
+      undefined,
+      opts?.sshAuthSock,
+    );
     return { exitCode: res.exitCode, stdout: res.stdout, stderr: res.stderr };
   }
 
@@ -192,7 +282,7 @@ export class DevPodBackend implements PodBackend {
   async upload(id: string, data: Uint8Array, command: string): Promise<ExecResult> {
     if (this.stdinWorks !== false) {
       const res = await this.run(
-        ["ssh", id, "--command", stdinUploadScript(data.length, command)],
+        ["ssh", id, ...SSH_FLAGS, "--command", stdinUploadScript(data.length, command)],
         10 * 60_000,
         false,
         data,
@@ -254,6 +344,19 @@ export class DevPodBackend implements PodBackend {
     const raw = text((await this.run(["provider", "list", "--output", "json"])).stdout);
     return parseProviders(raw);
   }
+}
+
+/**
+ * What to show when a pod's setup fails: the scripts' own "panem: …" lines when there are any
+ * (e.g. which repo failed to clone, with git's message), else the last lines of output.
+ */
+export function failureSummary(out: string): string {
+  const lines = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const ours = lines.filter((l) => l.startsWith("panem: ")).map((l) => l.slice(7));
+  return (ours.length ? ours.slice(-3) : lines.slice(-5)).join(" | ");
 }
 
 // ---- parsers (exported for tests; DevPod JSON shapes are not a stable API) ----

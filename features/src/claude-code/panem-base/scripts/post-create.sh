@@ -29,6 +29,42 @@ fi
 
 POD="$(pod_json)"
 
+# ---- 0. git access (files the controller placed before this script ran) ----
+# ~/.panem/git/known_hosts: host keys of the template's git hosts (never fetched blindly here).
+# ~/.panem/git/ssh_config: aliases from the controller's ~/.ssh/config (HostName, Port, User).
+# ~/.panem/git/https-hosts: "<host> <username>" for hosts reached with a token; the token itself
+# is only in ~/.config/panem/git-tokens, read by the credential helper.
+GIT_DIR_PANEM="$PANEM_STATE_DIR/git"
+if [ -d "$GIT_DIR_PANEM" ]; then
+  mkdir -p "$HOME/.ssh"
+  chmod 700 "$HOME/.ssh"
+  if [ -s "$GIT_DIR_PANEM/known_hosts" ]; then
+    touch "$HOME/.ssh/known_hosts"
+    chmod 600 "$HOME/.ssh/known_hosts"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      grep -qxF -- "$line" "$HOME/.ssh/known_hosts" || printf '%s\n' "$line" >>"$HOME/.ssh/known_hosts"
+    done <"$GIT_DIR_PANEM/known_hosts"
+  fi
+  if [ -s "$GIT_DIR_PANEM/ssh_config" ]; then
+    include="Include $GIT_DIR_PANEM/ssh_config"
+    touch "$HOME/.ssh/config"
+    if ! grep -qxF -- "$include" "$HOME/.ssh/config"; then
+      # First, so these aliases win over anything later in the file.
+      { printf '%s\n' "$include"; cat "$HOME/.ssh/config"; } >"$HOME/.ssh/config.panem-tmp"
+      mv "$HOME/.ssh/config.panem-tmp" "$HOME/.ssh/config"
+    fi
+    chmod 600 "$HOME/.ssh/config"
+  fi
+  if [ -s "$GIT_DIR_PANEM/https-hosts" ]; then
+    while read -r host user; do
+      [ -n "$host" ] || continue
+      git config --global "credential.https://$host.helper" "$PANEM_SHARE/git-credential-panem.sh"
+      git config --global "credential.https://$host.username" "$user"
+    done <"$GIT_DIR_PANEM/https-hosts"
+  fi
+fi
+
 # ---- 1. repos ----
 count="$(printf '%s' "$POD" | jq '.repos | length // 0')"
 for i in $(seq 0 $((count - 1))); do
@@ -41,11 +77,23 @@ for i in $(seq 0 $((count - 1))); do
     continue
   fi
   log "cloning $url@$ref -> $dest"
-  if ! git clone --quiet --branch "$ref" -- "$url" "$dest" 2>/dev/null; then
-    # Not a branch or tag: clone default branch, then check out the commit.
-    git clone --quiet -- "$url" "$dest"
-    git -C "$dest" checkout --quiet "$ref"
+  # Never prompt (there's no one to answer), and keep git's own message for the error.
+  errf="$(mktemp)"
+  if ! GIT_TERMINAL_PROMPT=0 git clone --quiet --branch "$ref" -- "$url" "$dest" 2>"$errf"; then
+    rm -rf "$dest"
+    # Not a branch or tag: clone the default branch, then check out the commit. A failure here
+    # (no access, unknown host key, missing ref) is reported with the repo and git's message.
+    if ! GIT_TERMINAL_PROMPT=0 git clone --quiet -- "$url" "$dest" 2>"$errf" ||
+      ! git -C "$dest" checkout --quiet "$ref" 2>"$errf"; then
+      msg="$(grep -v '^\s*$' "$errf" | grep -vi '^fatal: could not read from remote repository' | tail -n 3 | tr '\n' ' ')"
+      [ -n "$msg" ] || msg="$(tail -n 2 "$errf" | tr '\n' ' ')"
+      rm -f "$errf"
+      rm -rf "$dest" # so a retry clones again instead of skipping a half-made repo
+      echo "panem: clone of $name ($url) at $ref failed: ${msg% }" >&2
+      exit 1
+    fi
   fi
+  rm -f "$errf"
 done
 
 # ---- 2. context ----

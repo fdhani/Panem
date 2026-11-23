@@ -73,6 +73,17 @@ export const PortNumber = z.coerce.number().int().min(1).max(65535);
 /** Ports a template declares: pod port -> display name. Declared ports get the first slots. */
 export const PortNames = z.record(z.string().regex(/^\d{1,5}$/), z.string().min(1).max(40));
 
+/** HTTPS access to one git host: a Panem credential holding a token, used by a git helper. */
+export const GitHostAuth = z
+  .object({
+    /** Name of the credential (`panem env set NAME`) holding the token. */
+    token: EnvName,
+    /** Username sent with the token (default: x-access-token on github.com, else oauth2). */
+    username: z.string().min(1).max(100).optional(),
+  })
+  .strict();
+export type GitHostAuth = z.infer<typeof GitHostAuth>;
+
 export const Template = z.object({
   name: Slug,
   description: z.string().default(""),
@@ -88,6 +99,11 @@ export const Template = z.object({
    */
   env: z.array(EnvName).optional(),
   hooks: TemplateHooks.optional(),
+  /**
+   * HTTPS token access per git host, e.g. {"gitlab.com": {"token": "GITLAB_TOKEN"}}. SSH repos
+   * need nothing here: keys come from the controller's ~/.ssh/config.
+   */
+  git: z.record(z.string().regex(/^[A-Za-z0-9.-]+$/, "a host name"), GitHostAuth).optional(),
   /** Added to panem.json's `exclude` for pods of this template. */
   syncExclude: z.array(z.string().min(1)).optional(),
   /** Path inside the workspace folder, relative to it. Defaults to the template's .devcontainer folder. */

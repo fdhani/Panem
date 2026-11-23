@@ -4,6 +4,8 @@
 # shellcheck disable=SC2016
 {
   printf 'ARGS'; printf ' %q' "$@"; printf '\n'
+  # Which ssh-agent socket (if any) DevPod would forward on this call.
+  if [ "$1" = ssh ]; then printf 'SOCK %s\n' "${SSH_AUTH_SOCK:-}"; fi
   prev=""
   for a in "$@"; do
     if [ "$prev" = "--workspace-env-file" ]; then sed 's/^/ENV /' "$a"; fi

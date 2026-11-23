@@ -107,6 +107,24 @@ Panem starts nothing else. Templates shouldn't start databases or backends in `p
 
 Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.panem/`; DevPod's own copy of the workspace folder is in `/workspaces/<pod-id>/`, and Panem doesn't use it.
 
+## Private repos
+
+Panem gives each pod exactly the git access its template's repos need, and checks it works before building anything. A summon either clones every repo, or is refused straight away with one line per repo saying what's wrong: no host key, no credentials, no access, or no such branch. The Summon page runs the same check when you pick a template.
+
+**SSH repos** (`git@host:path`, `ssh://…`): nothing to add to templates. Set up the controller so that its own `git clone` of each repo works, as the user Panem runs as:
+1. **A key per host in `~/.ssh/config`**, e.g. `Host gitlab.com` with `IdentityFile ~/.ssh/gitlab_deploy`. Aliases work too: `git@gitlab-work:team/x.git` with `Host gitlab-work` and `HostName gitlab.com`. Keys must have no passphrase, since Panem can't type one. A read-only deploy key is ideal.
+2. **The host's key in `~/.ssh/known_hosts`:** run `ssh -T git@gitlab.com` once and check the fingerprint against the one the host publishes. Panem never fetches host keys blindly.
+
+At each summon Panem starts a short-lived ssh-agent of its own, loaded with **only the keys for that template's hosts**, and forwards it into the pod's setup session (the clone). It's gone once setup ends. Before-destroy hooks get the same for their run. Pods never receive key files, and the agent in the pod has no SSH access after setup.
+
+**HTTPS repos with a token** (`https://…`): add the token as a credential (`panem env set GITLAB_TOKEN`, or Settings → Agent credentials) and name it in the template:
+```json
+"git": { "gitlab.com": { "token": "GITLAB_TOKEN" } }
+```
+`username` is optional (default `x-access-token` for github.com, `oauth2` otherwise). The pod gets the token only in `~/.config/panem/git-tokens` (0600), read by Panem's git credential helper for that host. It isn't in the clone URL, git config, the pod's environment or any log, even if the template's `env` also lists it. The helper stays in the pod, so **this is how the agent in a pod can push**: use a token scoped to what it should do, read-only unless it should push.
+
+**DevPod settings Panem changes:** at startup, `panem serve` sets `SSH_ADD_PRIVATE_KEYS=false` and `SSH_INJECT_GIT_CREDENTIALS=false` on DevPod's context, and its own `devpod ssh` calls pass `--start-services=false`. Otherwise DevPod would load every key in `~/.ssh` into any forwarded agent, and forward the controller's whole git credential store to pods. These settings also apply to other DevPod use by the same user.
+
 ## Reaching pod services (ports)
 
 Each machine runs one `panem-forwarder` container, which the controller deploys over SSH. It publishes ports **only on that machine's Tailscale IP**, so traffic goes straight to the machine without passing through the home server.
@@ -293,7 +311,9 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 - Copy-in uses stdin through `devpod ssh`, and falls back to sending base64 in chunks if stdin doesn't arrive. CI's integration test reports which path DevPod used. The in-pod scripts need GNU `tar` (Debian and Ubuntu images have it; busybox tar on Alpine doesn't support every flag they use).
 - Pods built from a Feature release before 0.3.0 still copy the default context during setup. That's harmless, but default paths a `panem.json` excludes will still appear on those pods.
 - Remote Control running headless with `CLAUDE_CODE_OAUTH_TOKEN` must be confirmed on a real pod. Its output is logged to `~/.panem/remote-control.log`.
-- Cloning private repos inside a pod relies on DevPod forwarding the controller's git credentials during `up`.
+- **SSH git access exists only during setup and before-destroy hooks.** The agent in a pod can't `git push` over SSH. Give repos it should push to an `https://` URL and a token.
+- SSH keys with a passphrase can't be used: Panem can't unlock them unattended.
+- Forwarding Panem's scoped agent into `devpod ssh` with `--start-services=false` is tested with a fake DevPod. Check it on a real pod with a private repo.
 - Back up `~/.devpod` on the controller. If it is lost, re-add the machines; pods that DevPod lists again can be re-labelled with `panem rediscover`.
 - Using one Claude subscription on several machines at once: check Anthropic's terms.
 - **macOS hosts (Docker Desktop):** publishing on the Tailscale IP and reaching pod containers by their Docker IP need a real check.

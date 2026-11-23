@@ -12,6 +12,7 @@ import {
   queryClient,
   summon,
   useCredentials,
+  useGitCheck,
   useMachines,
   useTemplates,
   useWorkspace,
@@ -26,6 +27,7 @@ export function SummonPage() {
   const navigate = useNavigate();
   const [templateName, setTemplateName] = useState("");
   const [machine, setMachine] = useState("");
+  const gitCheck = useGitCheck(templateName);
   const [refs, setRefs] = useState<Record<string, string>>({});
 
   const template: Template | undefined = useMemo(
@@ -132,6 +134,21 @@ export function SummonPage() {
               {w.warning}
             </p>
           ))}
+        {gitCheck.isFetching && (
+          <p className="text-xs text-muted">Checking access to the template's repos…</p>
+        )}
+        {gitCheck.data?.problems.length ? (
+          <div className="rounded-lg bg-warn/10 px-3 py-2 text-sm text-warn">
+            <p className="font-medium">Pods of this template can't clone their repos yet:</p>
+            <ul className="mt-1 flex flex-col gap-1">
+              {gitCheck.data.problems.map((p) => (
+                <li key={`${p.repo}-${p.reason}`} className="break-words">
+                  <span className="font-mono">{p.repo}</span>: {p.message}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {missing.length > 0 && (
           <p className="rounded-lg bg-warn/10 px-3 py-2 text-sm text-warn">
             <span className="font-mono break-all">{missing.join(", ")}</span>{" "}

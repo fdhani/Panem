@@ -28,6 +28,13 @@ import {
 import { z } from "zod";
 import { exportPod } from "./exporter";
 import type { Forwarders, MachineRef } from "./forwarders";
+import {
+  type AccessPlan,
+  type GitAccess,
+  type GitProblem,
+  type ScopedAgent,
+  redact,
+} from "./git-access";
 import { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";
 import type { HostProbe } from "./probe";
 import type { Sources } from "./sources";
@@ -65,6 +72,11 @@ export interface ServiceDeps {
   relaySecret?: string;
   forwarders?: Forwarders;
   sources: Sources;
+  /**
+   * Git access for pods (host keys, a scoped ssh-agent, HTTPS tokens) and the preflight check.
+   * Omitted (mock mode, tests that don't need it): repos are cloned with whatever the pod has.
+   */
+  git?: GitAccess;
   /** Time limit for each before-destroy hook, in seconds (default 600). */
   hookTimeoutSec?: number;
   log?: (msg: string) => void;
@@ -467,6 +479,9 @@ export class PodService {
     } catch (e) {
       throw new HttpError(409, msg(e));
     }
+    const creds = (await this.d.credentials?.()) ?? {};
+    // Git access: give the pod what its repos need, and check it works before building anything.
+    const git = await this.prepareGit(repos, template.git, creds);
     // Panem's own Features, for templates that list "./panem-features/<id>" (no registry).
     await this.d.workspace.installFeatures(devcontainerPathFor(template));
     const meta = PodMeta.parse({
@@ -488,8 +503,10 @@ export class PodService {
 
     const env: Record<string, string> = { PANEM_POD: JSON.stringify(meta) };
     // Only the credentials this template opted in to (default: the Claude token, as before).
-    const creds = (await this.d.credentials?.()) ?? {};
-    const wanted = template.env ?? DEFAULT_TEMPLATE_ENV;
+    // Git tokens never go into the environment: the pod gets them in its git helper's file.
+    const wanted = (template.env ?? DEFAULT_TEMPLATE_ENV).filter(
+      (n) => !git.plan?.tokenNames.includes(n),
+    );
     for (const name of wanted) {
       if (creds[name]) env[name] = creds[name];
       else this.log(`${meta.id}: template ${template.name} wants ${name}, which isn't configured`);
@@ -504,7 +521,11 @@ export class PodService {
         source,
         devcontainerPath: devcontainerPathFor(template),
         env,
+        files: git.plan?.files,
+        sshAuthSock: git.agent?.sock,
       })
+      // The agent's keys were only for the clone: gone before anything else runs.
+      .finally(() => git.agent?.dispose())
       // Setup has run; place synced files before the start hook launches the agent.
       .then(() => this.syncIntoPod(meta))
       .then(() => this.d.backend.runHook(meta.id, "start"))
@@ -525,18 +546,95 @@ export class PodService {
   }
 
   /**
+   * Plan git access for a pod's repos, start a scoped ssh-agent, and check every repo is
+   * reachable with exactly that. Any problem refuses the summon (409), one line per repo.
+   */
+  private async prepareGit(
+    repos: PodMeta["repos"],
+    git: Record<string, { token: string; username?: string }> | undefined,
+    creds: Record<string, string>,
+  ): Promise<{ plan?: AccessPlan; agent?: ScopedAgent }> {
+    if (!this.d.git) return {};
+    const plan = await this.d.git.plan(repos, git, creds);
+    if (plan.problems.length) throw new HttpError(409, gitProblems(plan.problems));
+    let agent: ScopedAgent | undefined;
+    try {
+      agent = await this.d.git.agent(plan);
+    } catch (e) {
+      throw new HttpError(409, msg(e));
+    }
+    const problems = await this.d.git
+      .preflight(plan, agent)
+      .catch((e): GitProblem[] => [{ repo: "(all)", url: "", reason: "access", message: msg(e) }]);
+    if (problems.length) {
+      await agent?.dispose();
+      throw new HttpError(409, gitProblems(problems));
+    }
+    return { plan, agent };
+  }
+
+  private gitChecks = new Map<string, { at: number; result: Promise<GitCheck> }>();
+
+  /**
+   * The same checks summon makes, for the Summon page to show before anyone presses Summon.
+   * Cached for a minute per template.
+   */
+  gitCheck(name: string): Promise<GitCheck> {
+    const hit = this.gitChecks.get(name);
+    if (hit && Date.now() - hit.at < 60_000) return hit.result;
+    const result = (async (): Promise<GitCheck> => {
+      if (!this.d.git) return { checked: false, problems: [] };
+      const template = await this.d.templates.get(name);
+      if (!template) throw new HttpError(404, `template ${name} not found`);
+      const creds = (await this.d.credentials?.()) ?? {};
+      const repos = resolveRefs(template, {});
+      const plan = await this.d.git.plan(repos, template.git, creds);
+      if (plan.problems.length) return { checked: true, problems: plan.problems };
+      let agent: ScopedAgent | undefined;
+      try {
+        agent = await this.d.git.agent(plan);
+        return { checked: true, problems: await this.d.git.preflight(plan, agent) };
+      } catch (e) {
+        return {
+          checked: true,
+          problems: [{ repo: "(all)", url: "", reason: "credentials", message: msg(e) }],
+        };
+      } finally {
+        await agent?.dispose();
+      }
+    })();
+    this.gitChecks.set(name, { at: Date.now(), result });
+    result.catch(() => this.gitChecks.delete(name));
+    return result;
+  }
+
+  /**
    * Agents' before-destroy.sh, then the template's beforeDestroy command, in the pod. They push
    * whatever else should outlive it (e.g. overlay work) straight to its repo. A failure stops
    * the delete and keeps the pod (Retry, or Delete without saving).
    */
   private async runBeforeDestroy(meta: PodMeta): Promise<void> {
-    const r = await this.d.backend.exec(
-      meta.id,
-      bashCommand(BEFORE_DESTROY_SCRIPT, "panem-before-destroy", [
-        this.d.hookTimeoutSec ?? 600,
-        meta.hooks?.beforeDestroy ?? "",
-      ]),
-    );
+    // Hooks may push over SSH: lend them the same scoped agent the clone had (HTTPS tokens are
+    // already in the pod). Without it the hooks still run; a push of theirs would fail clearly.
+    let agent: ScopedAgent | undefined;
+    if (this.d.git) {
+      try {
+        const plan = await this.d.git.plan(meta.repos, undefined, {});
+        agent = plan.ssh.length ? await this.d.git.agent(plan) : undefined;
+      } catch (e) {
+        this.log(`${meta.id}: no SSH agent for before-destroy hooks: ${msg(e)}`);
+      }
+    }
+    const r = await this.d.backend
+      .exec(
+        meta.id,
+        bashCommand(BEFORE_DESTROY_SCRIPT, "panem-before-destroy", [
+          this.d.hookTimeoutSec ?? 600,
+          meta.hooks?.beforeDestroy ?? "",
+        ]),
+        agent ? { sshAuthSock: agent.sock } : undefined,
+      )
+      .finally(() => agent?.dispose());
     if (r.exitCode !== 0) {
       const lines = r.stderr.trim().split("\n").filter(Boolean);
       const reason = lines.at(-1)?.replace(/^panem: /, "") ?? "before-destroy hook failed";
@@ -798,6 +896,30 @@ export class PodService {
     await this.refresh();
     return { found, failed };
   }
+}
+
+export interface GitCheck {
+  /** False when git access isn't managed (mock mode). */
+  checked: boolean;
+  problems: GitProblem[];
+}
+
+const REASON_LABEL: Record<GitProblem["reason"], string> = {
+  url: "bad URL",
+  "host key": "no host key",
+  credentials: "no credentials",
+  access: "no access",
+  "no such ref": "no such branch or tag",
+};
+
+/** One line per repo, e.g. "api (git@gitlab.com:o/x.git): no host key: …". */
+export function gitProblems(problems: GitProblem[]): string {
+  return problems
+    .map(
+      (p) =>
+        `${p.repo}${p.url ? ` (${redact(p.url)})` : ""}: ${REASON_LABEL[p.reason]}: ${p.message}`,
+    )
+    .join("\n");
 }
 
 export function msg(e: unknown): string {
