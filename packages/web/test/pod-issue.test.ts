@@ -9,6 +9,11 @@ const agent = (id: string, state?: string) =>
 test("the card says which area has a problem, never which agent or what exactly", () => {
   expect(podIssue(pod({}))).toBeUndefined();
   expect(podIssue(pod({ agents: [agent("claude-code", "running")] }))).toBeUndefined();
+  // Stopped at a question in the pod: needs attention, like a missing sign-in.
+  expect(podIssue(pod({ agents: [agent("claude-code", "waiting")] }))).toEqual({
+    tone: "warn",
+    text: "There was an issue with your agent",
+  });
   expect(podIssue(pod({ agents: [agent("claude-code", "needs-login")] }))).toEqual({
     tone: "warn",
     text: "There was an issue with your agent",

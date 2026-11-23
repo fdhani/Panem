@@ -15,7 +15,10 @@ export function podIssue(pod: Pod): { tone: "warn" | "bad"; text: string } | und
   }
   if (pod.state !== "running") return undefined;
   const troubled = (pod.agents ?? []).filter(
-    (a) => a.status?.state === "needs-login" || a.status?.state === "error",
+    (a) =>
+      a.status?.state === "needs-login" ||
+      a.status?.state === "waiting" ||
+      a.status?.state === "error",
   );
   if (!troubled.length) return undefined;
   return {

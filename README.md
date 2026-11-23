@@ -103,13 +103,15 @@ DevPod reuses a built image when the config is unchanged, and the files of a loc
 2. It runs `devpod up <workspace folder> --devcontainer-path templates/<t>/... --provider m-<host>`. DevPod uploads the folder to the machine and builds the pod from the template's devcontainer. The pod metadata (`PANEM_POD`), the credentials the template lists and the relay secret are passed through a 0600 env file.
 3. **One-time setup** (the Feature's `post-create.sh`): clones each code repo at its ref into `/codebase/<repo>` (only pushed work is reachable), pre-trusts `/codebase/*`, and keeps Panem's own files (pod.json, logs) in `~/.panem/`.
 4. **Copy-in:** the controller copies the synced files in (CLAUDE.md, skills, memory, overlays, whatever the rules say). It keeps a copy of the memory it sent, under `~/.local/share/panem/pods/<id>/memory-base/`, to merge against when the pod is deleted.
-5. **Start hook** (`post-start.sh`): starts the port relay and `claude remote-control --name <pod id>` in tmux. It also runs on every later start.
+5. **Start hook** (`post-start.sh`): starts the port relay and `claude remote-control --name <pod id> --spawn=same-dir` in tmux. It also runs on every later start.
 
 Panem starts nothing else. Templates shouldn't start databases or backends in `postStartCommand` either, since pods would then run them all the time. The agent starts them when a task needs them; the scaffolded `CLAUDE.md` tells it how ("Services"). If your templates do start services, drop that line. Ports a service opens appear on the pod card as usual, closed until you switch them on.
 
 Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.panem/`; DevPod's own copy of the workspace folder is in `/workspaces/<pod-id>/`, and Panem doesn't use it.
 
 ## Signing agents in (Remote Control)
+
+**Remote Control starts without asking anything.** Its two first-run questions are answered in advance: "Enable Remote Control?" through `remoteDialogSeen: true` in the pod's `~/.claude.json` (set at setup and before each start; it's undocumented, found in Claude Code 2.1.330, so a later version may ask again), and the spawn mode through `--spawn`. Sessions start in the primary repo (`same-dir`); a template can choose another with the Feature's `spawn` option, e.g. `"./panem-features/claude-code": { "spawn": "worktree" }` (`worktree` or `single-session`). If Remote Control still stops at a question, the agent shows **Waiting for input** with the question, instead of looking connected.
 
 **Remote Control needs a claude.ai sign-in.** The token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`) only covers model requests; Anthropic's docs say it "can't establish Remote Control sessions". Pods keep it for that, but Remote Control is started without it, because it would take precedence over a sign-in.
 

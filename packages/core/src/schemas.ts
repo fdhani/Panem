@@ -44,7 +44,8 @@ export type TemplateHooks = z.infer<typeof TemplateHooks>;
 
 /** An agent installed in a pod (from ~/.panem/agents.json, written by the Panem base). */
 /** How an agent reports itself (agent_status in the pod; see features/README.md). */
-export const AgentState = z.enum(["running", "needs-login", "stopped", "error"]);
+/** waiting: the agent stopped at a question in the pod (answer it there, or fix the setup). */
+export const AgentState = z.enum(["running", "needs-login", "waiting", "stopped", "error"]);
 export type AgentState = z.infer<typeof AgentState>;
 
 export const AgentInfo = z.object({

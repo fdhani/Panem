@@ -3,6 +3,7 @@ export const AGENT_STATE: Record<string, { label: string; tone: "ok" | "warn" | 
   {
     running: { label: "Running", tone: "ok" },
     "needs-login": { label: "Needs sign-in", tone: "warn" },
+    waiting: { label: "Waiting for input", tone: "warn" },
     error: { label: "Error", tone: "bad" },
     stopped: { label: "Off", tone: "muted" },
   };

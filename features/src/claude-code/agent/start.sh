@@ -37,19 +37,45 @@ name="$(pod_json | jq -r '.id // empty')"
 name="${name:-$(hostname)}"
 dir="$(primary_repo_dir)"
 
+# Remote Control's first-run questions, answered in advance (see setup.sh): "Enable Remote
+# Control?" (remoteDialogSeen, undocumented) and the spawn mode (--spawn, the Feature's option).
+CLAUDE_JSON="$HOME/.claude.json"
+[ -f "$CLAUDE_JSON" ] || echo '{}' >"$CLAUDE_JSON"
+if [ "$(jq -r '.remoteDialogSeen // false' "$CLAUDE_JSON" 2>/dev/null)" != "true" ]; then
+  tmp="$(mktemp)"
+  jq '.remoteDialogSeen = true' "$CLAUDE_JSON" >"$tmp" && mv "$tmp" "$CLAUDE_JSON"
+  chmod 600 "$CLAUDE_JSON"
+fi
+case "${PANEM_RC_SPAWN:-same-dir}" in
+  same-dir | worktree | single-session) spawn="${PANEM_RC_SPAWN:-same-dir}" ;;
+  *) spawn=same-dir ;;
+esac
+
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 mkdir -p "$PANEM_STATE_DIR"
+# Only this start's output is looked at below (the log keeps earlier starts too).
+offset="$(wc -c <"$LOGFILE" 2>/dev/null || echo 0)"
 tmux new-session -d -s "$SESSION" -c "$dir" \
   -e "PATH=$PATH" \
-  "env -u CLAUDE_CODE_OAUTH_TOKEN claude remote-control --name '$name' --permission-mode '${PANEM_PERMISSION_MODE:-default}' 2>&1 | tee -a '$LOGFILE'"
+  "env -u CLAUDE_CODE_OAUTH_TOKEN claude remote-control --name '$name' --spawn=$spawn --permission-mode '${PANEM_PERMISSION_MODE:-default}' 2>&1 | tee -a '$LOGFILE'"
 
 # Remote Control exits at once when it can't start (e.g. sign-in rejected): say so on the card.
 sleep "${PANEM_RC_SETTLE_SECONDS:-5}"
+# The last thing this start printed, without terminal escape codes.
+last="$(tail -c +"$((offset + 1))" "$LOGFILE" 2>/dev/null | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n 1 | sed 's/[[:space:]]*$//' || true)"
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-  agent_status running ""
-  log "Remote Control started in tmux session $SESSION ($dir)"
+  case "$last" in
+    *"(y/n)"* | *"Choose ["*)
+      # A question nobody answered in advance: say so rather than look connected.
+      agent_status waiting "Remote Control is waiting for an answer in the pod: $last"
+      log "Remote Control is waiting for an answer (tmux session $SESSION): $last"
+      ;;
+    *)
+      agent_status running ""
+      log "Remote Control started in tmux session $SESSION ($dir)"
+      ;;
+  esac
 else
-  why="$(grep -v '^\s*$' "$LOGFILE" 2>/dev/null | tail -n 1 || true)"
-  agent_status error "Remote Control stopped: ${why:-no output}"
-  log "Remote Control exited: $why"
+  agent_status error "Remote Control stopped: ${last:-no output}"
+  log "Remote Control exited: $last"
 fi
