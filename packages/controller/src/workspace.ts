@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { PanemConfig, type WorkspaceHookName } from "@panem/core";
 import { derivedConfig } from "./devcontainer-config";
@@ -175,7 +175,12 @@ export class Workspace {
       for (const e of existing) {
         if (!e.isFile()) continue;
         const rel = relative(dir, join(e.parentPath, e.name)).split(sep).join("/");
-        if (rel !== ".gitignore" && !wanted.has(rel)) await rm(join(dir, rel), { force: true });
+        // Only files inside Feature folders are Panem's to clean up. The generated
+        // devcontainer.json and .gitignore sit at the top, and DevPod builds in a dot-folder
+        // here (.devpod-internal) while another pod of this template may be building.
+        const top = rel.split("/")[0]!;
+        if (!rel.includes("/") || top.startsWith(".")) continue;
+        if (!wanted.has(rel)) await rm(join(dir, rel), { force: true });
       }
       const ignore = join(dir, ".gitignore");
       if (!existsSync(ignore)) {
@@ -210,7 +215,13 @@ export class Workspace {
       }
       if (!derived) return { path: devcontainerPath };
       const path = join(dirname(devcontainerPath), FEATURES_DIR, "devcontainer.json");
-      await writeFile(join(root, path), derived.json);
+      // Unchanged: left alone. Changed: replaced in one step, so a build reading it never
+      // sees half a file.
+      const dest = join(root, path);
+      if ((await readFile(dest, "utf8").catch(() => undefined)) !== derived.json) {
+        await writeFile(`${dest}.tmp`, derived.json);
+        await rename(`${dest}.tmp`, dest);
+      }
       return { path, build };
     });
   }

@@ -45,7 +45,7 @@ export async function createController(o: ControllerOptions) {
     o.backend ??
     (mock
       ? await seededMock()
-      : new DevPodBackend({ bin: o.config.devpodPath, logDir: join(dir, "logs") }));
+      : new DevPodBackend({ bin: o.config.devpodPath, logDir: join(dir, "logs"), log: o.log }));
   const probe = o.probe ?? (mock ? new StaticProbe() : new TailscaleProbe());
   const forwarders =
     o.forwarders ??

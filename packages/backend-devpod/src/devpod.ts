@@ -15,6 +15,7 @@ import type {
   BackendMachine,
   BackendPod,
   ExecResult,
+  FolderLock,
   PodBackend,
   PodFile,
   UpOptions,
@@ -88,6 +89,7 @@ export interface DevPodOptions {
   env?: Record<string, string>;
   upTimeoutMs?: number;
   statusTimeoutMs?: number;
+  log?: (msg: string) => void;
 }
 
 export class DevPodBackend implements PodBackend {
@@ -96,9 +98,11 @@ export class DevPodBackend implements PodBackend {
   private readonly upTimeoutMs: number;
   private readonly statusTimeoutMs: number;
   private readonly logDir?: string;
+  private readonly log_: (msg: string) => void;
 
   constructor(opts: DevPodOptions = {}) {
     this.logDir = opts.logDir;
+    this.log_ = opts.log ?? ((m) => console.log(`[panem] ${m}`));
     this.bin = opts.bin ?? "devpod";
     this.env = { DEVPOD_DISABLE_TELEMETRY: "true", ...opts.env };
     this.upTimeoutMs = opts.upTimeoutMs ?? 30 * 60_000;
@@ -155,38 +159,52 @@ export class DevPodBackend implements PodBackend {
       // Local folders (tests, single-machine setups) take no @branch suffix.
       const local = /^(\/|\.\/|\.\.\/)/.test(o.source);
       const source = o.sourceRef && !local ? `${o.source}@${o.sourceRef}` : o.source;
-      const res = await this.run(
-        [
-          "up",
-          source,
-          "--id",
-          o.id,
-          "--provider",
-          o.machine,
-          "--ide",
-          "none",
-          "--open-ide=false",
-          "--devcontainer-path",
-          o.devcontainerPath,
-          "--workspace-env-file",
-          envFile,
-          // Verbose output costs nothing unless something fails, and then it's what we need.
-          "--debug",
-        ],
-        this.upTimeoutMs,
-        false,
-      );
-      const out = clean(`${text(res.stdout)}\n${res.stderr}`, Object.values(o.env));
-      await this.saveLog(o.id, "devpod up", out);
-      if (res.exitCode !== 0) {
-        const err = new BackendError(
-          `devpod up failed: ${headline(out)}`,
-          res.stderr,
-          res.exitCode,
-        );
-        err.detail = excerpt(out);
-        throw err;
-      }
+      const args = [
+        "up",
+        source,
+        "--id",
+        o.id,
+        "--provider",
+        o.machine,
+        "--ide",
+        "none",
+        "--open-ide=false",
+        "--devcontainer-path",
+        o.devcontainerPath,
+        "--workspace-env-file",
+        envFile,
+        // Verbose output costs nothing unless something fails, and then it's what we need.
+        "--debug",
+      ];
+      const secrets = Object.values(o.env);
+      const hold: FolderLock = o.withFolder ?? ((f) => f());
+      await hold(async () => {
+        let res = await this.run(args, this.upTimeoutMs, false);
+        let out = clean(`${text(res.stdout)}\n${res.stderr}`, secrets);
+        await this.saveLog(o.id, "devpod up", out);
+        // A build that fails before any container exists is retried once: it has failed
+        // intermittently (e.g. right after a delete) and passed when run again.
+        if (res.exitCode !== 0 && (await this.status(o.id)) === "notfound") {
+          this.log_(`${o.id}: devpod up failed before creating a container; retrying once`);
+          res = await this.run(args, this.upTimeoutMs, false);
+          out = clean(`${text(res.stdout)}\n${res.stderr}`, secrets);
+          await this.saveLog(
+            o.id,
+            "devpod up (retry: the first attempt failed before creating a container)",
+            out,
+            true,
+          );
+        }
+        if (res.exitCode !== 0) {
+          const err = new BackendError(
+            `devpod up failed: ${headline(out)}`,
+            res.stderr,
+            res.exitCode,
+          );
+          err.detail = excerpt(out);
+          throw err;
+        }
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -304,9 +322,11 @@ export class DevPodBackend implements PodBackend {
     }
   }
 
-  async start(id: string): Promise<void> {
-    // `devpod up <id>` starts a stopped workspace; `devpod ssh` does not.
-    await this.run(["up", id, "--ide", "none", "--open-ide=false"], this.upTimeoutMs);
+  async start(id: string, opts: { withFolder?: FolderLock } = {}): Promise<void> {
+    // `devpod up <id>` starts a stopped workspace; `devpod ssh` does not. It also reads the
+    // source folder (and clears DevPod's build files there), so it holds the folder too.
+    const hold: FolderLock = opts.withFolder ?? ((f) => f());
+    await hold(() => this.run(["up", id, "--ide", "none", "--open-ide=false"], this.upTimeoutMs));
     await this.lifecycle(id, "start");
   }
 

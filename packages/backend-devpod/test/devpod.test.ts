@@ -435,6 +435,75 @@ describe("a failed build keeps its error, not the stack trace", () => {
   });
 });
 
+describe("a build that fails before any container exists is retried once", () => {
+  const be = () =>
+    new DevPodBackend({
+      bin: join(import.meta.dir, "fake-devpod.sh"),
+      env: { FAKE_DIR: dir, FAKE_LOG: log },
+      logDir: join(dir, "logs"),
+      log: (m) => said.push(m),
+    });
+  let said: string[] = [];
+  beforeEach(() => {
+    said = [];
+  });
+  const upOnce = (b: DevPodBackend) =>
+    b.up({ id: "p1", machine: "m-a", source: "/ws", devcontainerPath: "p", env: {} });
+  const ups = () => calls().filter((c) => c.startsWith("ARGS up "));
+
+  test("failed build, no container: retried once, and both attempts are in the log", async () => {
+    fake("up.1", "info #7 ERROR: failed to compute cache key: not found\n", 1);
+    fake("up.2", "info Done\n", 0);
+    fake("status-p1", '{"state":"NotFound"}');
+    await upOnce(be());
+    expect(ups()).toHaveLength(2);
+    expect(said).toEqual(["p1: devpod up failed before creating a container; retrying once"]);
+    const saved = readFileSync(join(dir, "logs/p1.log"), "utf8");
+    expect(saved).toContain("failed to compute cache key");
+    expect(saved).toContain("===== devpod up (retry: the first attempt failed before creating");
+  });
+
+  test("still failing: one retry only, and the error is the second attempt's", async () => {
+    fake("up.1", "error: first\n", 1);
+    fake("up.2", "error: second\n", 1);
+    fake("status-p1", '{"state":"NotFound"}');
+    const err = await upOnce(be()).then(
+      () => undefined,
+      (e: BackendError) => e,
+    );
+    expect(ups()).toHaveLength(2);
+    expect(err?.message).toBe("devpod up failed: error: second");
+  });
+
+  test("a container exists (it failed later): no retry", async () => {
+    fake("up", "error: later step\n", 1);
+    fake("status-p1", '{"state":"Running"}');
+    await expect(upOnce(be())).rejects.toThrow("devpod up failed: error: later step");
+    expect(ups()).toHaveLength(1);
+    expect(said).toEqual([]);
+  });
+
+  test("the build runs inside the folder lock it's given, retry included", async () => {
+    fake("up.1", "error: first\n", 1);
+    fake("status-p1", '{"state":"NotFound"}');
+    const seen: string[] = [];
+    await be().up({
+      id: "p1",
+      machine: "m-a",
+      source: "/ws",
+      devcontainerPath: "p",
+      env: {},
+      withFolder: async (fn) => {
+        seen.push(`held, ${ups().length} up calls so far`);
+        const r = await fn();
+        seen.push(`released after ${ups().length}`);
+        return r;
+      },
+    });
+    expect(seen).toEqual(["held, 0 up calls so far", "released after 2"]);
+  });
+});
+
 describe("setup refuses an image with older Panem Features", () => {
   const share = () => {
     const d = mkdtempSync(join(tmpdir(), "share-"));
