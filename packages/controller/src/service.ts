@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   type AddMachineRequest,
   AgentInfo,
+  BackendError,
   type BackendPod,
   DEFAULT_TEMPLATE_ENV,
   type ForwarderState,
@@ -55,6 +56,14 @@ export class HttpError extends Error {
 interface Op {
   state: PodState;
   error?: string;
+  /** The failing step's last output lines (BackendError.detail). */
+  errorLog?: string[];
+}
+
+/** An error op, keeping the backend's output lines when there are any. */
+function errorOp(e: unknown): Op {
+  const detail = e instanceof BackendError ? e.detail : undefined;
+  return { state: "error", error: msg(e), ...(detail?.length ? { errorLog: detail } : {}) };
 }
 
 export interface ServiceDeps {
@@ -409,7 +418,16 @@ export class PodService {
       // Pods from before agents were pluggable always had Claude Code.
       agents: meta.agents ?? LEGACY_AGENTS,
     };
-    if (op) return { ...meta, ...ports, state: op.state, error: op.error, machineStatus };
+    if (op) {
+      return {
+        ...meta,
+        ...ports,
+        state: op.state,
+        error: op.error,
+        errorLog: op.errorLog,
+        machineStatus,
+      };
+    }
     const job = this.d.jobs.forPod(meta.id);
     if (job?.status === "failed") {
       return { ...meta, ...ports, state: "error", error: job.error, machineStatus };
@@ -539,7 +557,7 @@ export class PodService {
         },
         (e) => {
           this.log(`pod ${meta.id} failed to start: ${msg(e)}`);
-          this.setOp(meta.id, { state: "error", error: msg(e) });
+          this.setOp(meta.id, errorOp(e));
         },
       );
     return this.get(meta.id);
@@ -682,6 +700,12 @@ export class PodService {
     return pod;
   }
 
+  /** The pod's saved `devpod up` / setup output, if the backend keeps one. */
+  async podLog(id: string): Promise<string | undefined> {
+    this.get(id);
+    return this.d.backend.log?.(id);
+  }
+
   async stop(id: string): Promise<Pod> {
     const pod = this.assertIdle(id);
     if (pod.machineStatus === "offline") throw new HttpError(409, "machine is offline");
@@ -711,7 +735,7 @@ export class PodService {
         this.upsertBackend({ id, machine: meta?.machine ?? "", status: done });
         this.setOp(id, undefined);
       },
-      (e) => this.setOp(id, { state: "error", error: msg(e) }),
+      (e) => this.setOp(id, errorOp(e)),
     );
   }
 

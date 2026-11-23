@@ -116,7 +116,20 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
       {(pod.state === "running" || pod.services.length > 0) && <Services pod={pod} />}
 
       {pod.error && (
-        <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">{pod.error}</p>
+        <div className="rounded-lg bg-bad/10 px-3 py-2 text-sm text-bad">
+          <p className="break-words">{pod.error}</p>
+          {pod.errorLog?.length ? (
+            <details className="mt-1">
+              <summary className="cursor-pointer text-xs font-medium">Show log</summary>
+              <pre className="mt-2 max-h-72 overflow-auto rounded bg-surface px-2 py-1.5 font-mono text-[11px] leading-snug whitespace-pre text-text">
+                {pod.errorLog.join("\n")}
+              </pre>
+              <p className="mt-1 text-xs text-muted">
+                Full output: <span className="font-mono">GET /api/pods/{pod.id}/log</span>
+              </p>
+            </details>
+          ) : null}
+        </div>
       )}
       {action.error && (
         <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">

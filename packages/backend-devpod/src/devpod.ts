@@ -1,4 +1,14 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -65,6 +75,8 @@ export const LOCAL_HOST = "local";
 
 export interface DevPodOptions {
   bin?: string;
+  /** Where `devpod up` output (and pod setup output) is saved per pod, e.g. <data>/logs. */
+  logDir?: string;
   /** Extra env for every devpod call (e.g. DEVPOD_HOME in tests). */
   env?: Record<string, string>;
   upTimeoutMs?: number;
@@ -76,8 +88,10 @@ export class DevPodBackend implements PodBackend {
   private readonly env: Record<string, string>;
   private readonly upTimeoutMs: number;
   private readonly statusTimeoutMs: number;
+  private readonly logDir?: string;
 
   constructor(opts: DevPodOptions = {}) {
+    this.logDir = opts.logDir;
     this.bin = opts.bin ?? "devpod";
     this.env = { DEVPOD_DISABLE_TELEMETRY: "true", ...opts.env };
     this.upTimeoutMs = opts.upTimeoutMs ?? 30 * 60_000;
@@ -134,7 +148,7 @@ export class DevPodBackend implements PodBackend {
       // Local folders (tests, single-machine setups) take no @branch suffix.
       const local = /^(\/|\.\/|\.\.\/)/.test(o.source);
       const source = o.sourceRef && !local ? `${o.source}@${o.sourceRef}` : o.source;
-      await this.run(
+      const res = await this.run(
         [
           "up",
           source,
@@ -149,9 +163,23 @@ export class DevPodBackend implements PodBackend {
           o.devcontainerPath,
           "--workspace-env-file",
           envFile,
+          // Verbose output costs nothing unless something fails, and then it's what we need.
+          "--debug",
         ],
         this.upTimeoutMs,
+        false,
       );
+      const out = clean(`${text(res.stdout)}\n${res.stderr}`, Object.values(o.env));
+      await this.saveLog(o.id, "devpod up", out);
+      if (res.exitCode !== 0) {
+        const err = new BackendError(
+          `devpod up failed: ${lastMeaningful(out)}`,
+          res.stderr,
+          res.exitCode,
+        );
+        err.detail = tail(out, 60);
+        throw err;
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -208,12 +236,42 @@ export class DevPodBackend implements PodBackend {
       sshAuthSock,
     );
     if (r.exitCode !== 0) {
-      const out = `${text(r.stdout)}\n${r.stderr}`.trim();
-      throw new BackendError(
+      const out = clean(`${text(r.stdout)}\n${r.stderr}`);
+      await this.saveLog(id, phase === "create" ? "pod setup" : "start hook", out, true);
+      const err = new BackendError(
         `pod ${phase === "create" ? "setup" : "start hook"} failed: ${failureSummary(out)}`,
         r.stderr,
         r.exitCode,
       );
+      err.detail = tail(out, 60);
+      throw err;
+    }
+  }
+
+  /** The saved output of a pod's `devpod up` (and setup, if it failed), or undefined. */
+  async log(id: string): Promise<string | undefined> {
+    if (!this.logDir) return undefined;
+    return readFile(join(this.logDir, `${id}.log`), "utf8").catch(() => undefined);
+  }
+
+  /** Save a step's output for a pod, keeping only the newest logs. Never fails the caller. */
+  private async saveLog(id: string, step: string, out: string, append = false): Promise<void> {
+    const logDir = this.logDir;
+    if (!logDir) return;
+    try {
+      await mkdir(logDir, { recursive: true, mode: 0o700 });
+      const body = `===== ${step} (${new Date().toISOString()}) =====\n${out}\n`;
+      await (append ? appendFile : writeFile)(join(logDir, `${id}.log`), body, { mode: 0o600 });
+      const logs = await Promise.all(
+        (await readdir(logDir))
+          .filter((f) => f.endsWith(".log"))
+          .map(async (f) => ({ f, t: (await stat(join(logDir, f))).mtimeMs })),
+      );
+      for (const { f } of logs.sort((a, b) => b.t - a.t).slice(KEEP_LOGS)) {
+        await rm(join(logDir, f), { force: true });
+      }
+    } catch {
+      // A log we couldn't write is no reason to fail a pod.
     }
   }
 
@@ -357,6 +415,41 @@ export function failureSummary(out: string): string {
     .filter(Boolean);
   const ours = lines.filter((l) => l.startsWith("panem: ")).map((l) => l.slice(7));
   return (ours.length ? ours.slice(-3) : lines.slice(-5)).join(" | ");
+}
+
+/** Saved `devpod up` logs kept per controller (newest first). */
+export const KEEP_LOGS = 20;
+
+/**
+ * Output made readable and safe to keep: terminal escape codes and carriage-return redraws
+ * removed, and any of `secrets` (e.g. the env values passed to the pod) replaced by ***.
+ */
+export function clean(s: string, secrets: string[] = []): string {
+  let out = s
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape codes
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: OSC sequences
+    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "")
+    .split("\n")
+    .map((l) => l.split("\r").filter(Boolean).at(-1) ?? "")
+    .join("\n");
+  for (const v of secrets) if (v.length >= 8) out = out.split(v).join("***");
+  return out.trim();
+}
+
+/** Last n non-empty lines. */
+export function tail(s: string, n: number): string[] {
+  return s
+    .split("\n")
+    .filter((l) => l.trim())
+    .slice(-n);
+}
+
+/** The most useful single line: the last error-looking one, else the last line. */
+function lastMeaningful(out: string): string {
+  const lines = tail(out, 200);
+  const err = [...lines].reverse().find((l) => /\b(error|fatal|failed)\b/i.test(l));
+  return (err ?? lines.at(-1) ?? "unknown error").trim();
 }
 
 // ---- parsers (exported for tests; DevPod JSON shapes are not a stable API) ----

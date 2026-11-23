@@ -36,7 +36,10 @@ export async function createController(o: ControllerOptions) {
   const dir = o.dataDir ?? defaultDataDir();
   const mock = process.env.PANEM_BACKEND === "mock";
   const backend =
-    o.backend ?? (mock ? await seededMock() : new DevPodBackend({ bin: o.config.devpodPath }));
+    o.backend ??
+    (mock
+      ? await seededMock()
+      : new DevPodBackend({ bin: o.config.devpodPath, logDir: join(dir, "logs") }));
   const probe = o.probe ?? (mock ? new StaticProbe() : new TailscaleProbe());
   const forwarders =
     o.forwarders ??

@@ -191,6 +191,8 @@ export type PodServicePort = z.infer<typeof PodServicePort>;
 export const Pod = PodMeta.extend({
   state: PodState,
   error: z.string().optional(),
+  /** The last lines of output from the step that failed (e.g. devpod up), when there are any. */
+  errorLog: z.array(z.string()).optional(),
   machineStatus: MachineStatus,
   services: z.array(PodServicePort).default([]),
   /** Slot 0: an index page listing the pod's services. */
