@@ -2,8 +2,9 @@ import { existsSync, statSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { PanemConfig, type WorkspaceHookName } from "@panem/core";
+import { derivedConfig } from "./devcontainer-config";
 import { Mutex } from "./git";
-import { panemFeatures } from "./machine-assets";
+import { featuresHash, panemFeatures } from "./machine-assets";
 
 /** Folder next to a template's devcontainer.json where Panem keeps its Features up to date. */
 export const FEATURES_DIR = "panem-features";
@@ -159,6 +160,32 @@ export class Workspace {
         await writeFile(ignore, "# Written by Panem at each summon (its own Features).\n*\n");
       }
       return { written };
+    });
+  }
+
+  /**
+   * Make a template ready for DevPod: put Panem's Features in place and, when the template
+   * lists them, write the config DevPod should use (see derivedConfig) next to them. Returns
+   * that config's path (relative to the workspace) and the build it expects in the pod, or the
+   * template's own path when it doesn't use Panem's Features.
+   */
+  async prepareDevcontainer(devcontainerPath: string): Promise<{ path: string; build?: string }> {
+    await this.installFeatures(devcontainerPath);
+    return this.lock.run(async () => {
+      const root = resolve(await this.dir());
+      const raw = await readFile(join(root, devcontainerPath), "utf8").catch(() => undefined);
+      if (raw === undefined) return { path: devcontainerPath };
+      const build = await featuresHash();
+      let derived: ReturnType<typeof derivedConfig>;
+      try {
+        derived = derivedConfig(raw, build);
+      } catch (e) {
+        throw new WorkspaceError(`${devcontainerPath}: not valid JSON: ${(e as Error).message}`);
+      }
+      if (!derived) return { path: devcontainerPath };
+      const path = join(dirname(devcontainerPath), FEATURES_DIR, "devcontainer.json");
+      await writeFile(join(root, path), derived.json);
+      return { path, build };
     });
   }
 }

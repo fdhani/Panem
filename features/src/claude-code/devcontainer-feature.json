@@ -20,6 +20,11 @@
       "enum": ["default", "acceptEdits", "auto", "plan", "bypassPermissions"],
       "default": "default",
       "description": "Permission mode for sessions started through Remote Control."
+    },
+    "panemBuild": {
+      "type": "string",
+      "default": "",
+      "description": "Set by Panem at each summon (a hash of its Features), so DevPod builds a new image whenever they change. Leave empty."
     }
   },
   "containerEnv": {

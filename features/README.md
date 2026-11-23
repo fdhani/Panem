@@ -35,6 +35,8 @@ DevPod (v0.6.x) doesn't run lifecycle hooks declared by Features, so Panem runs 
 
 Both are idempotent.
 
+**`panemBuild` option:** set by the controller at each summon (a hash of the Features' files) and recorded in `/usr/local/share/panem/BUILD`. DevPod's image cache key includes Feature options, so a changed hash builds a new image. Setup refuses to run when the recorded build doesn't match the controller's (`PANEM_EXPECT_BUILD`). Leave it unset in templates.
+
 **Clone errors:** a failed clone stops setup with one line, `panem: clone of <repo> (<url>) at <ref> failed: <git's message>`, which the controller shows as the pod's error. Clones never prompt (`GIT_TERMINAL_PROMPT=0`).
 
 **Git token helper** (`git-credential-panem.sh`): answers `get` for the HTTPS hosts listed in `~/.config/panem/git-tokens` (0600, `<host> <username> <token>`), and nothing else. It's the only place a git token lives in a pod.

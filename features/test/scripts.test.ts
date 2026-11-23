@@ -322,6 +322,16 @@ describe.skipIf(!canInstall)("install scripts", () => {
   };
   const vendored = readFileSync(join(src, "panem/VERSION"), "utf8").trim();
 
+  test("the panemBuild option is recorded, for setup to check the image is current", () => {
+    const d = mkdtempSync(join(root, "inst-"));
+    const share = join(d, "share");
+    install("claude-code", share, join(d, "codebase"), { PANEMBUILD: "b1234" });
+    expect(readFileSync(join(share, "BUILD"), "utf8").trim()).toBe("b1234");
+    const plain = join(mkdtempSync(join(root, "inst-")), "share");
+    install("panem", plain, join(d, "codebase2"));
+    expect(existsSync(join(plain, "BUILD"))).toBe(false);
+  });
+
   test("the agent Feature alone brings the base and registers itself", () => {
     const d = mkdtempSync(join(root, "inst-"));
     const share = join(d, "share");

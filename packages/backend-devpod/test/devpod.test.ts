@@ -10,7 +10,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackendError } from "@panem/core";
-import { DevPodBackend, KEEP_LOGS, failureSummary, parseProviders, parseStatus } from "../src";
+import {
+  BOOTSTRAP_CREATE,
+  DevPodBackend,
+  KEEP_LOGS,
+  failureSummary,
+  parseProviders,
+  parseStatus,
+} from "../src";
 
 let dir: string;
 let log: string;
@@ -54,9 +61,8 @@ describe("DevPodBackend", () => {
     expect(l).toContain("ENV CLAUDE_CODE_OAUTH_TOKEN=secret");
     expect(l).toContain('ENV PANEM_POD={"id":"x"}');
     // DevPod skips Feature lifecycle hooks, so setup runs over ssh right after up...
-    expect(calls()[1]).toStartWith(
-      "ARGS ssh shop-abc123 --start-services=false --command if\\ \\[\\ -x\\ /usr/local/share/panem/post-create.sh",
-    );
+    expect(calls()[1]).toStartWith("ARGS ssh shop-abc123 --start-services=false --command ");
+    expect(calls()[1]).toContain("/usr/local/share/panem/post-create.sh");
     // ...but not the start hook: the controller copies synced files in first.
     expect(calls()[1]).not.toContain("post-start");
     expect(calls()).toHaveLength(2);
@@ -355,5 +361,38 @@ describe("devpod up diagnostics", () => {
     }
     expect(readdirSync(logDir)).toHaveLength(KEEP_LOGS);
     expect(existsSync(join(logDir, `p${KEEP_LOGS + 2}.log`))).toBe(true);
+  });
+});
+
+describe("setup refuses an image with older Panem Features", () => {
+  const share = () => {
+    const d = mkdtempSync(join(tmpdir(), "share-"));
+    writeFileSync(join(d, "post-create.sh"), "#!/bin/sh\necho setup-ran\n", { mode: 0o755 });
+    return d;
+  };
+  const run = (dir: string, env: Record<string, string>) =>
+    Bun.spawnSync(["bash", "-c", BOOTSTRAP_CREATE.replaceAll("/usr/local/share/panem", dir)], {
+      env: { PATH: process.env.PATH!, HOME: mkdtempSync(join(tmpdir(), "h-")), ...env },
+    });
+
+  test("matching build: setup runs", () => {
+    const d = share();
+    writeFileSync(join(d, "BUILD"), "abc123\n");
+    const r = run(d, { PANEM_EXPECT_BUILD: "abc123" });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.toString()).toContain("setup-ran");
+  });
+
+  test("a stale image fails with what to do; no expectation means no check", () => {
+    const d = share();
+    writeFileSync(join(d, "BUILD"), "old999\n");
+    const r = run(d, { PANEM_EXPECT_BUILD: "abc123" });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain(
+      "panem: this pod was built from a cached image with older Panem Features (build old999, expected abc123)",
+    );
+    expect(r.stdout.toString()).not.toContain("setup-ran");
+    expect(failureSummary(r.stderr.toString())).toContain("Delete the image");
+    expect(run(share(), {}).exitCode).toBe(0);
   });
 });

@@ -22,6 +22,9 @@ if [ ! -x "$SHARE/post-create.sh" ] || { [ "$newest" = "$vendored" ] && [ "$inst
   bash "$HERE/panem-base/install.sh"
 fi
 
+# Which build of Panem's Features this image has (the panemBuild option), checked at setup.
+if [ -n "${PANEMBUILD:-}" ]; then printf '%s\n' "$PANEMBUILD" >"$SHARE/BUILD"; fi
+
 mkdir -p "$AGENT"
 cp "$HERE"/agent/* "$AGENT/"
 chmod 755 "$AGENT"/*.sh

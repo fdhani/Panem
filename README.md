@@ -93,7 +93,9 @@ With the folder as a git repo (`git init`, add a remote, push once), templates y
 
 ### Panem's Features
 
-Templates list Panem's devcontainer Features by a local path, e.g. `"./panem-features/claude-code"`. At every summon Panem writes them next to the template's `devcontainer.json`, in `panem-features/` (always the running version, with a `.gitignore` so a git-backed workspace stays clean), and DevPod uploads them with the workspace. Nothing has to be published to a registry. A template still listing `ghcr.io/fdhani/panem/claude-code:0` gets a warning on the Summon page: change it to the local path.
+Templates list Panem's devcontainer Features by a local path, e.g. `"./panem-features/claude-code"`. At every summon Panem writes them next to the template's `devcontainer.json`, in `panem-features/` (always the running version, with a `.gitignore` so a git-backed workspace stays clean), and DevPod uploads them with the workspace.
+
+DevPod reuses a built image when the config is unchanged, and the files of a local Feature don't count. So for templates listing `./panem-features/…`, Panem also writes `panem-features/devcontainer.json`: your config with relative paths adjusted, and a `panemBuild` option (a hash of Panem's Features) on each of them. That's the config DevPod builds from, so a Panem upgrade always builds a fresh image. Your `devcontainer.json` is never edited. As a safety net, setup checks that the pod's Features match. If they don't, the summon fails with "built from a cached image with older Panem Features" and how to clear it. Nothing has to be published to a registry. A template still listing `ghcr.io/fdhani/panem/claude-code:0` gets a warning on the Summon page: change it to the local path.
 
 ## How a pod is built
 

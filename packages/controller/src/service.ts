@@ -501,7 +501,8 @@ export class PodService {
     // Git access: give the pod what its repos need, and check it works before building anything.
     const git = await this.prepareGit(repos, template.git, creds);
     // Panem's own Features, for templates that list "./panem-features/<id>" (no registry).
-    await this.d.workspace.installFeatures(devcontainerPathFor(template));
+    // Panem's Features, and the config DevPod gets (a new image whenever they change).
+    const dc = await this.d.workspace.prepareDevcontainer(devcontainerPathFor(template));
     const meta = PodMeta.parse({
       id: newPodId(template.name),
       template: template.name,
@@ -531,13 +532,15 @@ export class PodService {
     }
     env.PANEM_AGENT_ENV = wanted.join(",");
     if (this.d.relaySecret) env.PANEM_RELAY_SECRET = this.d.relaySecret;
+    // Setup checks the image really has these Features (see BOOTSTRAP_CREATE).
+    if (dc.build) env.PANEM_EXPECT_BUILD = dc.build;
     void this.d.backend
       .up({
         id: meta.id,
         machine: machine.name,
         // DevPod uploads the workspace folder to the machine and builds from it.
         source,
-        devcontainerPath: devcontainerPathFor(template),
+        devcontainerPath: dc.path,
         env,
         files: git.plan?.files,
         sshAuthSock: git.agent?.sock,

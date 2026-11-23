@@ -32,6 +32,13 @@ const HOOKS = "/usr/local/share/panem";
  * separately (runHook), after the controller has copied synced files in.
  */
 export const BOOTSTRAP_CREATE = [
+  // An image DevPod reused from an older build would run old setup scripts: say so plainly.
+  'if [ -n "${PANEM_EXPECT_BUILD:-}" ]; then',
+  `  got="$(cat ${HOOKS}/BUILD 2>/dev/null || true)";`,
+  '  if [ "$got" != "$PANEM_EXPECT_BUILD" ]; then',
+  '    echo "panem: this pod was built from a cached image with older Panem Features (build ${got:-none}, expected $PANEM_EXPECT_BUILD). Delete the image (docker image ls, look for vsc-*) and summon again." >&2; exit 1;',
+  "  fi;",
+  "fi;",
   `if [ -x ${HOOKS}/post-create.sh ]; then`,
   // pod.json marks setup as done: ~/.panem today, /workspace/.panem before the rename.
   `  if [ ! -f "$HOME/.panem/pod.json" ] && [ ! -f ${LEGACY_POD_STATE_DIR}/pod.json ]; then ${HOOKS}/post-create.sh || exit $?; fi;`,
