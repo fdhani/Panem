@@ -3,7 +3,7 @@ import type { Server, TCPSocketListener } from "bun";
 import type { Allocator } from "./alloc";
 import type { ContainerInfo, DockerApi } from "./docker";
 import { listenPort } from "./proxy";
-import { parseList, relayAsk } from "./relay";
+import { type Connect, parseList, relayAsk } from "./relay";
 
 interface PodMetaLite {
   id: string;
@@ -31,6 +31,19 @@ export interface ForwarderOptions {
   /** The forwarder's own container id, when running in Docker (joins pod networks). */
   selfId?: string;
   log?: (m: string) => void;
+  /** How the relay is reached (tests replace it). */
+  connect?: Connect;
+}
+
+/**
+ * Containers that may be pods: built by DevPod or the devcontainer CLI. Others (databases, other
+ * Compose projects) are never probed: they're often on networks we can't reach, where a connect
+ * can hang for minutes.
+ */
+export function isDevcontainer(c: ContainerInfo): boolean {
+  return Object.keys(c.labels).some(
+    (k) => k.startsWith("dev.containers") || k.startsWith("devpod"),
+  );
 }
 
 const NOT_A_POD_RETRY_MS = 30_000;
@@ -46,7 +59,9 @@ export class Forwarder {
   /** container id -> pod meta, or the time it was last found not to be a pod. */
   private probed = new Map<string, PodMetaLite | number>();
   private listeners = new Map<number, TCPSocketListener<unknown> | Server<unknown>>();
+  /** Networks we're on (pods are reachable there), and ones we couldn't join. */
   private joined = new Set<string>();
+  private joinFailed = new Set<string>();
   private unplaced: string[] = [];
   private readonly log: (m: string) => void;
 
@@ -56,7 +71,7 @@ export class Forwarder {
 
   async tick(): Promise<void> {
     const containers = (await this.o.docker.running()).filter(
-      (c) => !this.o.selfId || !c.id.startsWith(this.o.selfId),
+      (c) => (!this.o.selfId || !c.id.startsWith(this.o.selfId)) && isDevcontainer(c),
     );
     await this.joinNetworks(containers);
     const seen = new Map<string, LivePod>();
@@ -71,7 +86,13 @@ export class Forwarder {
         try {
           const ignore = new Set([...(meta.ignorePorts ?? []), this.o.relayPort]);
           live = parseList(
-            await relayAsk({ ip, port: this.o.relayPort }, this.o.secret, "list"),
+            await relayAsk(
+              { ip, port: this.o.relayPort },
+              this.o.secret,
+              "list",
+              1500,
+              this.o.connect,
+            ),
           ).filter((p) => !ignore.has(p));
         } catch {
           reachable = false;
@@ -118,8 +139,9 @@ export class Forwarder {
     return this.state().pods.find((p) => p.id === id);
   }
 
-  /** Prefer an address on a network we share (always true on the default bridge). */
+  /** Prefer an address on a network we've joined (else the first: the default bridge). */
   private ipFor(c: ContainerInfo): string | undefined {
+    for (const [net, ip] of c.networks) if (this.joined.has(net)) return ip;
     return [...c.networks.values()][0];
   }
 
@@ -128,7 +150,13 @@ export class Forwarder {
     if (typeof cached === "object") return cached;
     if (typeof cached === "number" && Date.now() - cached < NOT_A_POD_RETRY_MS) return undefined;
     try {
-      const raw = await relayAsk({ ip, port: this.o.relayPort }, this.o.secret, "meta", 1000);
+      const raw = await relayAsk(
+        { ip, port: this.o.relayPort },
+        this.o.secret,
+        "meta",
+        1000,
+        this.o.connect,
+      );
       const meta = JSON.parse(raw) as PodMetaLite;
       if (typeof meta.id !== "string" || !meta.id) throw new Error("no id");
       this.probed.set(c.id, meta);
@@ -147,19 +175,20 @@ export class Forwarder {
   private async joinNetworks(containers: ContainerInfo[]) {
     if (!this.o.selfId) return;
     for (const c of containers) {
-      const devcontainer = Object.keys(c.labels).some(
-        (k) => k.startsWith("dev.containers") || k.startsWith("devpod"),
-      );
-      if (!devcontainer) continue;
+      if (!isDevcontainer(c)) continue;
       for (const net of c.networks.keys()) {
-        if (this.joined.has(net)) continue;
-        this.joined.add(net);
+        if (this.joined.has(net) || this.joinFailed.has(net)) continue;
         try {
           await this.o.docker.connectNetwork(net, this.o.selfId);
+          this.joined.add(net);
           this.log(`joined network ${net.slice(0, 12)}`);
         } catch (e) {
           // Already connected is the common case.
-          if (!String(e).includes("already exists")) this.log(`join ${net.slice(0, 12)}: ${e}`);
+          if (String(e).includes("already exists")) this.joined.add(net);
+          else {
+            this.joinFailed.add(net);
+            this.log(`join ${net.slice(0, 12)}: ${e}`);
+          }
         }
       }
     }

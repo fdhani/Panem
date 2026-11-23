@@ -5,24 +5,37 @@ export interface RelayTarget {
   port: number;
 }
 
-/** Send "<secret> <cmd>" and collect the reply until the relay closes. */
+export type Connect = typeof Bun.connect;
+
+/**
+ * Send "<secret> <cmd>" and collect the reply until the relay closes. The time limit covers the
+ * whole exchange, connecting included: to a container on a network this forwarder can't reach,
+ * a connect can hang for minutes, so it's raced against the timer, and a socket that connects
+ * after giving up is closed at once.
+ */
 export async function relayAsk(
   t: RelayTarget,
   secret: string,
   cmd: "list" | "meta",
   timeoutMs = 1500,
+  connect: Connect = Bun.connect,
 ): Promise<string> {
   const chunks: Uint8Array[] = [];
   const done = Promise.withResolvers<void>();
-  // Rejections are observed via `await done.promise`; avoid unhandled ones if connect throws first.
   done.promise.catch(() => {});
-  let sock: Awaited<ReturnType<typeof Bun.connect>> | undefined;
-  const timer = setTimeout(() => {
-    sock?.end();
-    done.reject(new Error("relay timeout"));
-  }, timeoutMs);
+  let sock: Awaited<ReturnType<Connect>> | undefined;
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      sock?.end();
+      reject(new Error("relay timeout"));
+    }, timeoutMs);
+  });
+  timeout.catch(() => {});
   try {
-    sock = await Bun.connect({
+    const connecting = connect({
       hostname: t.ip,
       port: t.port,
       socket: {
@@ -40,8 +53,11 @@ export async function relayAsk(
         },
       },
     });
+    // Connected only after we gave up: don't leave the socket open.
+    connecting.then((s) => timedOut && s.end()).catch(() => {});
+    sock = await Promise.race([connecting, timeout]);
     sock.write(`${secret} ${cmd}\n`);
-    await done.promise;
+    await Promise.race([done.promise, timeout]);
   } finally {
     clearTimeout(timer);
   }
