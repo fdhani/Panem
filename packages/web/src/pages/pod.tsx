@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, GitBranch } from "lucide-react";
+import { PodResourcesCard } from "../components/resources";
 import { MachineDot, PodStateBadge } from "../components/status";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -108,6 +109,8 @@ export function PodPage() {
           })}
         </section>
       )}
+
+      <PodResourcesCard pod={pod} />
 
       {pod.repos.length > 0 && (
         <Card className="flex flex-col gap-2 p-4">

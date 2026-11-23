@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { MachineAgents } from "../components/agent-logins";
+import { MachineResourcesCard } from "../components/resources";
 import { MachineDot, PodStateBadge } from "../components/status";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -74,6 +75,11 @@ export function MachinePage() {
         )}
         {repair.error && <p className="mt-1 text-xs text-bad">{repair.error.message}</p>}
       </div>
+
+      <section className="flex flex-col gap-2">
+        <h2 className="font-medium">Resources</h2>
+        <MachineResourcesCard machine={m} />
+      </section>
 
       <section className="flex flex-col gap-2">
         <h2 className="font-medium">Agents</h2>
