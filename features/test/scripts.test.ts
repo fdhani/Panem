@@ -320,32 +320,96 @@ describe("claude-code agent", () => {
     expect(status(off).state).toBe("stopped");
   });
 
-  test("one sign-in per machine: the login lives in the machine's volume, shared by its pods", () => {
+  /** A folder standing in for the machine's sign-in volume, listed as a mount. */
+  const volume = () => {
     const logins = mkdtempSync(join(root, "logins-"));
+    const mountinfo = join(logins, "..", `${logins.split("/").at(-1)}.mountinfo`);
+    writeFileSync(mountinfo, `36 35 98:0 / ${logins} rw,relatime - ext4 /dev/sda1 rw\n`);
+    return { logins, mountinfo, env: { PANEM_LOGINS_DIR: logins, PANEM_MOUNTINFO: mountinfo } };
+  };
+  const loginJson = (p: ReturnType<typeof pod>) =>
+    JSON.parse(readFileSync(join(p.home, ".panem/agents/claude-code.login.json"), "utf8"));
+
+  test("one sign-in per machine: the login lives in the machine's volume, shared by its pods", () => {
+    const { logins, env: vol } = volume();
     const a = pod();
     a.run("post-create.sh", env);
     // A login made in the pod before the volume existed moves into it.
     signIn(a);
-    a.run("post-start.sh", { ...fast, PANEM_LOGINS_DIR: logins, PANEM_RELAY_PORT: "17995" });
+    a.run("post-start.sh", { ...fast, ...vol, PANEM_RELAY_PORT: "17995" });
     const shared = join(logins, "claude-code/.claude/.credentials.json");
     expect(existsSync(shared)).toBe(true);
     expect(readlinkSync(join(a.home, ".claude/.credentials.json"))).toBe(shared);
     expect(status(a).state).toBe("running");
+    expect(loginJson(a)).toEqual({ shared: true });
 
     // Another pod on the same machine starts signed in.
     const b = pod();
     b.run("post-create.sh", env);
-    b.run("post-start.sh", { ...fast, PANEM_LOGINS_DIR: logins, PANEM_RELAY_PORT: "17994" });
+    b.run("post-start.sh", { ...fast, ...vol, PANEM_RELAY_PORT: "17994" });
     expect(readlinkSync(join(b.home, ".claude/.credentials.json"))).toBe(shared);
     expect(status(b).state).toBe("running");
   });
 
+  test("no shared volume mounted: the pod says so, and why a sign-in stays in it", () => {
+    const p = pod();
+    p.run("post-create.sh", env);
+    const unmounted = mkdtempSync(join(root, "logins-"));
+    const none = join(root, "empty.mountinfo");
+    writeFileSync(none, "");
+    p.run("post-start.sh", {
+      ...fast,
+      PANEM_LOGINS_DIR: unmounted,
+      PANEM_MOUNTINFO: none,
+      PANEM_RELAY_PORT: "17993",
+    });
+    expect(loginJson(p)).toMatchObject({ shared: false });
+    expect(loginJson(p).reason).toContain("no shared sign-in volume");
+    expect(status(p).state).toBe("needs-login");
+    expect(status(p).message).toContain("This pod can't use the machine's sign-in");
+    expect(existsSync(join(unmounted, "claude-code"))).toBe(false);
+  });
+
+  // Root can write anywhere, so these only mean something as an ordinary user (as in CI).
+  test.skipIf(process.getuid?.() === 0)(
+    "a volume the pod user can't write (and no sudo): reported, not silently skipped",
+    () => {
+      const { logins, env: vol } = volume();
+      chmodSync(logins, 0o555);
+      const p = pod();
+      p.run("post-create.sh", env);
+      p.run("post-start.sh", { ...fast, ...vol, PANEM_RELAY_PORT: "17992" });
+      chmodSync(logins, 0o755);
+      expect(loginJson(p)).toMatchObject({ shared: false });
+      expect(loginJson(p).reason).toContain("isn't writable");
+    },
+  );
+
+  test.skipIf(process.getuid?.() === 0)(
+    "another user's sign-in in the volume: reported with its owner",
+    () => {
+      const { logins, env: vol } = volume();
+      mkdirSync(join(logins, "claude-code"));
+      chmodSync(join(logins, "claude-code"), 0o500);
+      const p = pod();
+      p.run("post-create.sh", env);
+      p.run("post-start.sh", { ...fast, ...vol, PANEM_RELAY_PORT: "17991" });
+      chmodSync(join(logins, "claude-code"), 0o700);
+      expect(loginJson(p).reason).toContain("belongs to another user");
+    },
+  );
+
   test("agent-login.sh runs the agent's own sign-in, straight into the shared volume", () => {
-    const logins = mkdtempSync(join(root, "logins-"));
+    const { logins, mountinfo } = volume();
     const p = pod();
     p.run("post-create.sh", env);
     const r = Bun.spawnSync(["bash", join(p.share, "agent-login.sh"), "claude-code"], {
-      env: { PATH: `${bin}:${process.env.PATH}`, HOME: p.home, PANEM_LOGINS_DIR: logins },
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        HOME: p.home,
+        PANEM_LOGINS_DIR: logins,
+        PANEM_MOUNTINFO: mountinfo,
+      },
     });
     expect(r.stdout.toString()).toContain("signed-in");
     expect(existsSync(join(logins, "claude-code/.claude/.credentials.json"))).toBe(true);

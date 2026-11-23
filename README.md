@@ -113,15 +113,18 @@ Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.pan
 
 **Remote Control needs a claude.ai sign-in.** The token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`) only covers model requests; Anthropic's docs say it "can't establish Remote Control sessions". Pods keep it for that, but Remote Control is started without it, because it would take precedence over a sign-in.
 
-**Sign in once per machine:**
+**Sign in once per machine,** from the web UI: **Machines → <machine>** shows each agent you can sign in to, whether it's signed in on that machine, and how it's doing in each pod there; press its **Sign in to …** button. The Machines list flags agents waiting for a sign-in. Or from a terminal on the controller (`panem machine login` and `panem pod login` still work as older names):
 ```bash
-panem pod login <pod-id>          # on the controller; from elsewhere: ssh -t <controller> panem pod login <pod-id>
+panem agent-login                            # what you can sign in to, on each machine
+panem agent-login <machine> [agent]          # sign in; from elsewhere: ssh -t <controller> panem agent-login <machine>
+panem agent-login --pod <pod-id> [agent]     # sign in one pod only (one that can't use the machine's sign-in)
 ```
-- It opens Claude Code's own sign-in in your terminal (`claude auth login` in the pod): open the URL it prints, sign in, and paste the code back. Panem never sees the code or the login.
-- The login file is kept in a Docker volume on that machine (`panem-logins`), so every pod there signs in with it from its next start. Add `--all` to restart the agent in the machine's other running pods now.
+- It runs the agent's own sign-in in a pod on that machine (for Claude Code, `claude auth login`): open the link it prints, sign in, and paste the code back. In the UI this happens in a terminal in the page; Panem passes the terminal through and never reads or keeps what's typed or shown.
+- The login is kept in a Docker volume on that machine (`panem-logins`). When the sign-in finishes, the agent restarts in every running pod there that was waiting for one, and new pods start signed in. Pods where it already runs are left alone.
 - Panem doesn't copy logins between machines: each machine signs in once.
+- **If a pod can't use the machine's sign-in,** its agent page says why: the pod has no sign-in volume (built before sign-ins were shared: summon it again), the volume isn't writable by the pod's user (Panem first tries to fix that with passwordless sudo), or it holds another user's sign-in. You can still sign in just that pod from its agent page.
 
-**The pod card shows each agent's state:** running; needs sign-in, with the command to run; or an error, with the agent's own message and a Retry button. This works the same for any agent Feature (see "Writing an agent Feature" in `features/README.md`).
+**Each agent's state shows on the pod's page and the Machines page:** running; needs sign-in; or an error, with the agent's own message and a Restart button. This works the same for any agent Feature that declares a `login` (see "Writing an agent Feature" in `features/README.md`).
 
 ## Private repos
 

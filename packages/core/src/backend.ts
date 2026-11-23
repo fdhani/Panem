@@ -60,6 +60,11 @@ export interface PodBackend {
   up(opts: UpOptions): Promise<void>;
   list(): Promise<BackendPod[]>;
   start(id: string, opts?: { withFolder?: FolderLock }): Promise<void>;
+  /**
+   * argv that runs `command` in the pod interactively, for a terminal (PTY) on the controller:
+   * an agent's sign-in. Its env must not lend the controller's ssh-agent.
+   */
+  interactiveArgv(id: string, command: string): { argv: string[]; env: Record<string, string> };
   stop(id: string): Promise<void>;
   delete(id: string, opts?: { force?: boolean }): Promise<void>;
   exec(id: string, command: string, opts?: { sshAuthSock?: string }): Promise<ExecResult>;

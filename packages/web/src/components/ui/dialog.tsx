@@ -10,11 +10,14 @@ export function Dialog({
   onClose,
   title,
   children,
+  wide = false,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: ReactNode;
+  /** Wider on larger screens (e.g. a terminal). */
+  wide?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -53,7 +56,7 @@ export function Dialog({
       onKeyDown={(e) => {
         if (e.key === "Escape") onClose();
       }}
-      className="mt-auto mb-0 w-full max-w-full rounded-t-2xl border border-border bg-surface p-0 text-text shadow-xl backdrop:bg-black/50 sm:m-auto sm:max-w-md sm:rounded-2xl"
+      className={`mt-auto mb-0 w-full max-w-full rounded-t-2xl border border-border bg-surface p-0 text-text shadow-xl backdrop:bg-black/50 sm:m-auto sm:rounded-2xl ${wide ? "sm:max-w-3xl" : "sm:max-w-md"}`}
     >
       <div className="p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] sm:pb-5">
         <h2 id={titleId} className="pr-2 text-base font-semibold break-words">

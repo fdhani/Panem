@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { Machine, Pod } from "@panem/core";
+import type { Machine, MachineLogin, Pod } from "@panem/core";
 import {
   Config,
   EnvName,
@@ -12,6 +12,7 @@ import {
   configPath,
   dataDir,
   loadConfig,
+  pickLoginPod,
   removeCredential,
   saveConfig,
   setCredential,
@@ -321,6 +322,15 @@ const machine = defineCommand({
         console.log(`forwarder ${st.status}`);
       },
     }),
+    login: defineCommand({
+      meta: { name: "login", description: "Same as `panem agent-login <machine> [agent]`" },
+      args: {
+        name: { type: "positional", required: true },
+        agent: { type: "positional", required: false },
+      },
+      run: ({ args }) =>
+        agentLogin({ machine: String(args.name), agent: args.agent as string | undefined }),
+    }),
     rm: defineCommand({
       meta: { name: "rm", description: "Remove a machine" },
       args: { name: { type: "positional", required: true } },
@@ -334,6 +344,141 @@ const machine = defineCommand({
     }),
   },
 });
+
+const LOGIN_STATE_TEXT: Record<MachineLogin["state"], string> = {
+  "signed-in": "signed in",
+  "needs-sign-in": "needs sign-in",
+  "no-pods": "no running pod",
+  unknown: "check its pods",
+};
+
+/**
+ * `panem agent-login`: with no machine, list the agents that can be signed in to on each
+ * machine; with one, sign an agent in there (or in one pod, with --pod).
+ */
+async function agentLogin(o: { machine?: string; agent?: string; pod?: string }) {
+  const c = await client();
+  const machines = await c.call<Machine[]>("GET", "/api/machines");
+  if (o.pod) {
+    const p = await c.call<Pod>("GET", `/api/pods/${encodeURIComponent(o.pod)}`);
+    const withLogin = (p.agents ?? []).filter((a) => a.login);
+    const a = o.agent ? withLogin.find((x) => x.id === o.agent) : withLogin[0];
+    if (!a) {
+      throw new Error(
+        o.agent
+          ? `pod ${o.pod} has no agent ${o.agent} with a sign-in`
+          : `no agent in pod ${o.pod} has a sign-in`,
+      );
+    }
+    await signInHere(c, { machine: p.machine, agent: a.id, pod: o.pod, label: a.login?.label });
+    return;
+  }
+  if (!o.machine) {
+    const rows = machines.flatMap((m) =>
+      (m.logins ?? []).map((l) => [
+        m.name.replace(/^m-/, ""),
+        `${l.label} (${l.agent})`,
+        LOGIN_STATE_TEXT[l.state],
+        l.pods.length ? l.pods.map((p) => p.id).join(", ") : "-",
+      ]),
+    );
+    if (rows.length === 0) {
+      console.log("No agents to sign in to (none of Panem's agents has a sign-in).");
+      return;
+    }
+    console.log(table([["MACHINE", "AGENT", "SIGN-IN", "RUNNING PODS"], ...rows]));
+    console.log(
+      "\nSign in with: panem agent-login <machine> [agent]   (or Machines → Sign in in the web UI)",
+    );
+    return;
+  }
+  const name = o.machine.startsWith("m-") ? o.machine : `m-${o.machine}`;
+  const m = machines.find((x) => x.name === name);
+  if (!m) throw new Error(`machine ${o.machine} not registered (see: panem machine ls)`);
+  const logins = m.logins ?? [];
+  const login = o.agent
+    ? logins.find((l) => l.agent === o.agent)
+    : (logins.find((l) => l.state === "needs-sign-in") ?? logins[0]);
+  if (!login) {
+    throw new Error(
+      o.agent
+        ? `no agent ${o.agent} with a sign-in on ${o.machine}; see: panem agent-login`
+        : `no agent with a sign-in on ${o.machine}`,
+    );
+  }
+  const pods = await c.call<Pod[]>("GET", "/api/pods");
+  const pod = pickLoginPod(name, login.agent, pods);
+  if (!pod) {
+    throw new Error(
+      `no running pod on ${o.machine} has ${login.label}; summon one, then sign in from it`,
+    );
+  }
+  await signInHere(c, { machine: name, agent: login.agent, pod, label: login.loginLabel });
+}
+
+const agentLoginCmd = defineCommand({
+  meta: {
+    name: "agent-login",
+    description:
+      "Sign an agent in on a machine (one sign-in serves every pod there). With no machine, list the agents you can sign in to",
+  },
+  args: {
+    machine: { type: "positional", required: false, description: "Machine (default: list)" },
+    agent: {
+      type: "positional",
+      required: false,
+      description: "Agent id (default: the first one waiting for a sign-in)",
+    },
+    pod: {
+      type: "string",
+      description: "Sign in this pod only (one that can't use the machine's sign-in)",
+    },
+  },
+  run: ({ args }) =>
+    agentLogin({
+      machine: args.machine as string | undefined,
+      agent: args.agent as string | undefined,
+      pod: args.pod as string | undefined,
+    }),
+});
+
+/**
+ * Run an agent's own sign-in in this terminal, in a pod (over DevPod, so on the controller), then
+ * let the controller restart the agent wherever it waits for a sign-in on that machine. The
+ * same flow as the web UI's Sign in, for any agent with a "login" block.
+ */
+async function signInHere(
+  c: Awaited<ReturnType<typeof client>>,
+  t: { machine: string; agent: string; pod: string; label?: string },
+) {
+  const cfg = await loadConfig().catch(() => undefined);
+  if (!cfg) {
+    throw new Error(
+      "run this on the controller (it uses DevPod there): ssh -t <controller> panem agent-login …, or use Sign in on the Machines page of the web UI",
+    );
+  }
+  console.log(
+    `${t.label ?? "Sign in"} (${t.agent}) on ${t.machine.replace(/^m-/, "")}, in ${t.pod}. Follow the steps below; the sign-in is yours, Panem never sees it.\n`,
+  );
+  const proc = Bun.spawn(
+    [
+      cfg.devpodPath,
+      "ssh",
+      t.pod,
+      "--start-services=false",
+      "--command",
+      `/usr/local/share/panem/agent-login.sh ${t.agent}`,
+    ],
+    { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, SSH_AUTH_SOCK: "" } },
+  );
+  if ((await proc.exited) !== 0) throw new Error("sign-in didn't finish");
+  const r = await c.call<{ restarted: string[] }>(
+    "POST",
+    `/api/machines/${encodeURIComponent(t.machine)}/logins/${encodeURIComponent(t.agent)}/done`,
+    { pod: t.pod },
+  );
+  console.log(`Signed in. ${t.agent} restarted in: ${r.restarted.join(", ")}`);
+}
 
 const podId = { id: { type: "positional", required: true } } as const;
 
@@ -405,84 +550,10 @@ const pod = defineCommand({
       },
     }),
     login: defineCommand({
-      meta: {
-        name: "login",
-        description:
-          "Sign an agent in, in this terminal (run on the controller). The login is kept per machine, so other pods there can use it",
-      },
-      args: {
-        ...podId,
-        agent: {
-          type: "positional",
-          required: false,
-          description: "Agent id (default: the first one with a sign-in)",
-        },
-        all: {
-          type: "boolean",
-          description: "Then restart the agent in the machine's other running pods too",
-        },
-      },
-      async run({ args }) {
-        const c = await client();
-        const id = String(args.id);
-        const p = await c.call<Pod>("GET", `/api/pods/${encodeURIComponent(id)}`);
-        const withLogin = (p.agents ?? []).filter((a) => a.login);
-        const agent = args.agent ? withLogin.find((a) => a.id === args.agent) : withLogin[0];
-        if (!agent) {
-          throw new Error(
-            args.agent
-              ? `pod ${id} has no agent ${args.agent} with a sign-in`
-              : `no agent in pod ${id} has a sign-in`,
-          );
-        }
-        // DevPod lives on the controller: this has to run there.
-        const cfg = await loadConfig().catch(() => undefined);
-        if (!cfg) {
-          throw new Error(
-            `run this on the controller (it uses DevPod there): ssh -t <controller> panem pod login ${id}`,
-          );
-        }
-        console.log(
-          `${agent.login?.label ?? "Sign in"} (${agent.id}) in ${id}. Follow the steps below; the sign-in is yours, Panem never sees it.\n`,
-        );
-        const proc = Bun.spawn(
-          [
-            cfg.devpodPath,
-            "ssh",
-            id,
-            "--start-services=false",
-            "--command",
-            `/usr/local/share/panem/agent-login.sh ${agent.id}`,
-          ],
-          { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, SSH_AUTH_SOCK: "" } },
-        );
-        if ((await proc.exited) !== 0) throw new Error("sign-in didn't finish");
-        const restart = async (pid: string) => {
-          const r = await c.call<Pod>(
-            "POST",
-            `/api/pods/${encodeURIComponent(pid)}/agents/${agent.id}/restart`,
-          );
-          const st = r.agents?.find((a) => a.id === agent.id)?.status;
-          console.log(
-            `${pid}: ${agent.id} ${st?.state ?? "restarted"}${st?.message ? ` (${st.message})` : ""}`,
-          );
-        };
-        await restart(id);
-        if (args.all) {
-          const others = (await c.call<Pod[]>("GET", "/api/pods")).filter(
-            (o) =>
-              o.id !== id &&
-              o.machine === p.machine &&
-              o.state === "running" &&
-              o.agents?.some((a) => a.id === agent.id),
-          );
-          for (const o of others) await restart(o.id);
-        } else {
-          console.log(
-            `Other pods on ${p.machine.replace(/^m-/, "")} use this sign-in from their next start (or run again with --all).`,
-          );
-        }
-      },
+      meta: { name: "login", description: "Same as `panem agent-login --pod <pod> [agent]`" },
+      args: { ...podId, agent: { type: "positional", required: false } },
+      run: ({ args }) =>
+        agentLogin({ pod: String(args.id), agent: args.agent as string | undefined }),
     }),
     rm: defineCommand({
       meta: {
@@ -565,7 +636,17 @@ const rediscover = defineCommand({
 
 export const main = defineCommand({
   meta: { name: "panem", version: VERSION, description: "Agent pods on your own machines" },
-  subCommands: { serve, init, workspace, token, env, machine, pod, rediscover },
+  subCommands: {
+    serve,
+    init,
+    workspace,
+    token,
+    env,
+    machine,
+    pod,
+    "agent-login": agentLoginCmd,
+    rediscover,
+  },
 });
 
 if (import.meta.main) runMain(main);

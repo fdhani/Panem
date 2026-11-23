@@ -7,10 +7,12 @@ import {
   dataDir as defaultDataDir,
   loadConfig,
 } from "@panem/core";
+import type { Server } from "bun";
 import { createApp } from "./api";
 import { Credentials } from "./credentials";
 import { ForwarderManager, type Forwarders } from "./forwarders";
 import { GitAccess } from "./git-access";
+import type { LoginWsData } from "./logins";
 import { MockBackend, MockForwarders } from "./mock-backend";
 import { type HostProbe, StaticProbe, TailscaleProbe, tailscaleIPv4 } from "./probe";
 import { PodService } from "./service";
@@ -93,6 +95,7 @@ export async function createController(o: ControllerOptions) {
     ui: await loadUi(),
     log: o.log,
   });
+  await service.loadShippedAgents();
   return { app, service, backend, workspace, credentials };
 }
 
@@ -120,8 +123,26 @@ async function seededMock(): Promise<MockBackend> {
   return m;
 }
 
+/**
+ * Bun.serve's handlers: the API, plus the WebSocket of an agent's sign-in terminal (which
+ * authenticates with its one-time ticket, not the API token).
+ */
+export function serveOptions(ctl: {
+  app: { fetch: (r: Request) => Response | Promise<Response> };
+  service: PodService;
+}) {
+  return {
+    fetch(req: Request, server: Server<LoginWsData>) {
+      const r = ctl.service.logins.upgrade(req, server);
+      return r === false ? ctl.app.fetch(req) : r;
+    },
+    websocket: ctl.service.logins.websocket,
+  };
+}
+
 export async function serve(config: Config, configPath?: string) {
-  const { app, service, backend } = await createController({ config, configPath });
+  const ctl = await createController({ config, configPath });
+  const { service, backend } = ctl;
   if (backend instanceof DevPodBackend) {
     // Panem scopes git access itself: stop DevPod adding all ~/.ssh keys to forwarded agents
     // and forwarding the controller's git credential store to pods.
@@ -167,7 +188,7 @@ export async function serve(config: Config, configPath?: string) {
   const bound = new Set<string>();
   const bind = (hostname: string) => {
     if (bound.has(hostname)) return;
-    const s = Bun.serve({ hostname, port: config.port, fetch: app.fetch, idleTimeout: 0 });
+    const s = Bun.serve({ hostname, port: config.port, idleTimeout: 0, ...serveOptions(ctl) });
     bound.add(hostname);
     servers.push(s);
     console.log(`[panem] listening on http://${s.hostname}:${s.port}`);

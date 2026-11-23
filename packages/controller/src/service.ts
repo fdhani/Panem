@@ -22,8 +22,10 @@ import {
   type ServerEvent,
   type SummonRequest,
   devcontainerPathFor,
+  machineLogins,
   machineProviderName,
   newPodId,
+  pickLoginPod,
   resolveRefs,
   resolveSync,
 } from "@panem/core";
@@ -37,6 +39,8 @@ import {
   type ScopedAgent,
   redact,
 } from "./git-access";
+import { LoginSessions } from "./logins";
+import { shippedAgents } from "./machine-assets";
 import { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";
 import type { HostProbe } from "./probe";
 import type { Sources } from "./sources";
@@ -145,7 +149,7 @@ export class PodService {
 
   snapshot(): ServerEvent[] {
     return [
-      { type: "machines", machines: this.machineCache },
+      { type: "machines", machines: this.machines() },
       { type: "pods", pods: this.podList() },
       { type: "jobs", jobs: this.d.jobs.all() },
     ];
@@ -153,6 +157,8 @@ export class PodService {
 
   private publishPods() {
     this.emit({ type: "pods", pods: this.podList() });
+    // Sign-in states come from pods: a change there can change a machine's.
+    this.emit({ type: "machines", machines: this.machines() });
     this.emit({ type: "jobs", jobs: this.d.jobs.all() });
   }
 
@@ -187,7 +193,7 @@ export class PodService {
       statuses.filter((m) => m.status !== "offline").map((m) => this.pollForwarder(m)),
     );
     this.machineCache = statuses.map((m) => ({ ...m, forwarder: this.fwd.get(m.name)?.status }));
-    this.emit({ type: "machines", machines: this.machineCache });
+    this.emit({ type: "machines", machines: this.machines() });
     return this.machineCache;
   }
 
@@ -278,12 +284,30 @@ export class PodService {
       this.machineCache = this.machineCache.map((x) =>
         x.name === m.name ? { ...x, forwarder: this.fwd.get(m.name)?.status } : x,
       );
-      this.emit({ type: "machines", machines: this.machineCache });
+      this.emit({ type: "machines", machines: this.machines() });
     }
   }
 
+  /** Agents Panem ships (their agent.json), loaded once by loadShippedAgents(). */
+  private shipped: AgentInfo[] = [];
+
+  async loadShippedAgents(): Promise<void> {
+    this.shipped = await shippedAgents().catch((e) => {
+      this.log(`couldn't read the shipped agents: ${msg(e)}`);
+      return [];
+    });
+  }
+
+  /**
+   * Machines, each with its agents' sign-ins (worked out from its pods). Agents Panem ships with
+   * a sign-in are listed on every machine, so people see what they can sign in to.
+   */
   machines(): Machine[] {
-    return this.machineCache;
+    const pods = this.podList();
+    return this.machineCache.map((m) => {
+      const logins = machineLogins(m.name, pods, this.shipped);
+      return logins.length ? { ...m, logins } : m;
+    });
   }
 
   private machineStatus(name: string): MachineStatus {
@@ -679,11 +703,27 @@ export class PodService {
     const r = await this.d.backend.exec(
       id,
       // No agents.json fails (an older Feature); no status files is fine.
-      `cat "$HOME/.panem/agents.json" || exit 1; echo ${STATUS_MARK}; for f in "$HOME"/.panem/agents/*.status.json; do if [ -f "$f" ]; then tr -d '\\n' < "$f"; echo; fi; done; exit 0`,
+      `cat "$HOME/.panem/agents.json" || exit 1; echo ${STATUS_MARK}; for f in "$HOME"/.panem/agents/*.status.json; do if [ -f "$f" ]; then tr -d '\\n' < "$f"; echo; fi; done; echo ${LOGIN_MARK}; for f in "$HOME"/.panem/agents/*.login.json; do if [ -f "$f" ]; then printf '%s ' "$(basename "$f" .login.json)"; tr -d '\\n' < "$f"; echo; fi; done; exit 0`,
     );
     if (r.exitCode !== 0) return; // a Feature from before agents were pluggable: see toPod
     try {
-      const [list = "", statuses = ""] = new TextDecoder().decode(r.stdout).split(STATUS_MARK);
+      const [list = "", rest = ""] = new TextDecoder().decode(r.stdout).split(STATUS_MARK);
+      const [statuses = "", logins = ""] = rest.split(LOGIN_MARK);
+      // Whether each agent uses the machine's sign-in here (link_agent_logins).
+      const sharing = new Map<string, { shared?: boolean; reason?: string }>();
+      for (const line of logins.split("\n")) {
+        const sp = line.indexOf(" ");
+        if (sp < 1) continue;
+        try {
+          const j = JSON.parse(line.slice(sp + 1)) as { shared?: unknown; reason?: unknown };
+          sharing.set(line.slice(0, sp), {
+            shared: typeof j.shared === "boolean" ? j.shared : undefined,
+            reason: typeof j.reason === "string" ? j.reason : undefined,
+          });
+        } catch {
+          // One unreadable file doesn't hide the others.
+        }
+      }
       const byId = new Map<string, AgentInfo["status"]>();
       for (const line of statuses.split("\n")) {
         if (!line.trim()) continue;
@@ -703,7 +743,11 @@ export class PodService {
       const agents = z
         .array(AgentInfo)
         .parse(JSON.parse(list))
-        .map((a) => ({ ...a, status: byId.get(a.id) ?? a.status }));
+        .map((a) => ({
+          ...a,
+          status: byId.get(a.id) ?? a.status,
+          ...(a.login && sharing.has(a.id) ? { login: { ...a.login, ...sharing.get(a.id) } } : {}),
+        }));
       const current = this.d.pods.get(id);
       if (current) {
         await this.d.pods.put({ ...current, agents });
@@ -726,7 +770,7 @@ export class PodService {
     return new TextDecoder().decode(r.stdout);
   }
 
-  /** Restart one agent in a pod (e.g. after `panem pod login`) and re-read its status. */
+  /** Restart one agent in a pod (e.g. after a sign-in) and re-read its status. */
   async restartAgent(id: string, agent: string): Promise<Pod> {
     const pod = this.assertIdle(id);
     if (!/^[A-Za-z0-9_-]+$/.test(agent) || !(pod.agents ?? []).some((a) => a.id === agent)) {
@@ -740,6 +784,80 @@ export class PodService {
     if (r.exitCode !== 0) this.log(`${id}: restarting ${agent} failed: ${r.stderr.trim()}`);
     await this.recordAgents(id);
     return this.get(id);
+  }
+
+  // ---------- sign-ins (any agent with a "login" block; see logins.ts) ----------
+
+  /** Terminal sessions that run an agent's own sign-in in a pod, for the web UI. */
+  readonly logins = new LoginSessions({
+    command: (t) =>
+      this.d.backend.interactiveArgv(t.pod, `/usr/local/share/panem/agent-login.sh ${t.agent}`),
+    signedIn: (t) => this.signedIn(t.machine, t.agent, t.pod),
+  });
+
+  /**
+   * Where and how to sign an agent in on a machine: the pod to run its sign-in in (`pod`, or one
+   * using the machine's sign-in) and a one-time ticket for the terminal session.
+   */
+  startLogin(machine: string, agent: string, pod?: string): { ticket: string; pod: string } {
+    const target = this.loginTarget(machine, agent, pod);
+    try {
+      return { ticket: this.logins.issue(target), pod: target.pod };
+    } catch (e) {
+      throw new HttpError(409, msg(e));
+    }
+  }
+
+  /** The pod a sign-in runs in, checked: on that machine, running, with that agent's sign-in. */
+  loginTarget(machine: string, agent: string, pod?: string) {
+    if (!/^[A-Za-z0-9_-]+$/.test(agent)) throw new HttpError(404, `no agent ${agent}`);
+    if (!this.machineCache.some((m) => m.name === machine)) {
+      throw new HttpError(404, `machine ${machine} not registered`);
+    }
+    const pods = this.podList();
+    const id = pod ?? pickLoginPod(machine, agent, pods);
+    const p = pods.find((x) => x.id === id && x.machine === machine);
+    if (!id || !p || p.state !== "running") {
+      throw new HttpError(
+        409,
+        pod
+          ? `pod ${pod} isn't running on ${machine}`
+          : `no running pod on ${machine.replace(/^m-/, "")} has ${agent}; summon one to sign in from`,
+      );
+    }
+    if (!(p.agents ?? []).some((a) => a.id === agent && a.login)) {
+      throw new HttpError(404, `pod ${id} has no agent ${agent} with a sign-in`);
+    }
+    return { machine, agent, pod: id };
+  }
+
+  /**
+   * After a sign-in: restart the agent in the pod it ran in, then in the machine's other running
+   * pods where it waits for one (they share the sign-in). Running agents are left alone.
+   */
+  async signedIn(machine: string, agent: string, pod: string): Promise<{ restarted: string[] }> {
+    const restarted: string[] = [];
+    await this.restartAgent(pod, agent);
+    restarted.push(pod);
+    const waiting = this.podList().filter(
+      (p) =>
+        p.id !== pod &&
+        p.machine === machine &&
+        p.state === "running" &&
+        (p.agents ?? []).some(
+          (a) => a.id === agent && a.status?.state === "needs-login" && a.login?.shared !== false,
+        ),
+    );
+    for (const p of waiting) {
+      try {
+        await this.restartAgent(p.id, agent);
+        restarted.push(p.id);
+      } catch (e) {
+        this.log(`${p.id}: restarting ${agent} after sign-in failed: ${msg(e)}`);
+      }
+    }
+    this.log(`${agent} signed in on ${machine}; restarted it in ${restarted.join(", ")}`);
+    return { restarted };
   }
 
   /** Where a pod's memory merge base is kept: the memory it was given at copy-in. */
@@ -1001,8 +1119,9 @@ export interface GitCheck {
   problems: GitProblem[];
 }
 
-/** Separates agents.json from the status lines in recordAgents' output. */
+/** Separate agents.json, the status lines and the sign-in lines in recordAgents' output. */
 const STATUS_MARK = "---panem-agent-status---";
+const LOGIN_MARK = "---panem-agent-login---";
 
 const REASON_LABEL: Record<GitProblem["reason"], string> = {
   url: "bad URL",

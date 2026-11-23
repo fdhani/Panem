@@ -57,12 +57,18 @@ export const AgentInfo = z.object({
     .regex(/^~\/[A-Za-z0-9._/-]+$/)
     .refine((p) => !p.includes(".."), "no ..")
     .optional(),
-  /** The agent's own sign-in, run with `panem pod login`; its files can be shared per machine. */
+  /**
+   * The agent's own sign-in (run from the UI or `panem agent-login`); its
+   * files are shared per machine. `shared`/`reason`: whether this pod uses the machine's
+   * sign-in, and why not (from ~/.panem/agents/<id>.login.json).
+   */
   login: z
     .object({
       label: z.string().default("Sign in"),
       command: z.string().optional(),
       share: z.array(z.string()).optional(),
+      shared: z.boolean().optional(),
+      reason: z.string().optional(),
     })
     .optional(),
   /** Last reported state (from the agent's start hook). */
@@ -145,6 +151,28 @@ export const ForwarderStatus = z.object({
 });
 export type ForwarderStatus = z.infer<typeof ForwarderStatus>;
 
+/**
+ * One agent's sign-in on a machine, worked out from its pods (any agent whose agent.json has a
+ * "login" block): signed-in when a pod there runs the agent with the machine's sign-in,
+ * needs-sign-in when pods wait for one, no-pods when no running pod has the agent, unknown
+ * otherwise (e.g. the agent failed for another reason: its page says why).
+ */
+export const MachineLogin = z.object({
+  agent: z.string(),
+  label: z.string(),
+  loginLabel: z.string(),
+  state: z.enum(["signed-in", "needs-sign-in", "no-pods", "unknown"]),
+  pods: z.array(
+    z.object({
+      id: z.string(),
+      state: AgentState.optional(),
+      shared: z.boolean().optional(),
+      reason: z.string().optional(),
+    }),
+  ),
+});
+export type MachineLogin = z.infer<typeof MachineLogin>;
+
 export const Machine = z.object({
   /** DevPod provider name, e.g. m-vps. */
   name: z.string(),
@@ -153,6 +181,8 @@ export const Machine = z.object({
   user: z.string().optional(),
   status: MachineStatus,
   forwarder: ForwarderStatus.optional(),
+  /** Agents' sign-ins on this machine. */
+  logins: z.array(MachineLogin).optional(),
 });
 export type Machine = z.infer<typeof Machine>;
 
