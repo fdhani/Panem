@@ -18,6 +18,7 @@ import {
   failureSummary,
   headline,
   isStackFrame,
+  parseList,
   parseProviders,
   parseStatus,
 } from "../src";
@@ -365,6 +366,18 @@ describe("devpod up diagnostics", () => {
     expect(readdirSync(logDir)).toHaveLength(KEEP_LOGS);
     expect(existsSync(join(logDir, `p${KEEP_LOGS + 2}.log`))).toBe(true);
   });
+});
+
+test("devpod list: each workspace's uid (it labels the container) is kept", () => {
+  const raw = JSON.stringify([
+    { id: "omni-ab12cd", uid: "default-om-ab12c", provider: { name: "m-local" } },
+    { id: "old", provider: { name: "m-local" } },
+    { id: "theirs", uid: "x", provider: { name: "docker" } },
+  ]);
+  expect(parseList(raw)).toEqual([
+    { id: "omni-ab12cd", provider: "m-local", uid: "default-om-ab12c" },
+    { id: "old", provider: "m-local" },
+  ]);
 });
 
 describe("a failed build keeps its error, not the stack trace", () => {

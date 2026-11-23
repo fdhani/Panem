@@ -13,10 +13,11 @@ import { Credentials } from "./credentials";
 import { ForwarderManager, type Forwarders } from "./forwarders";
 import { GitAccess } from "./git-access";
 import type { LoginWsData } from "./logins";
-import { MockBackend, MockForwarders } from "./mock-backend";
+import { MockBackend, MockForwarders, MockResourceShell } from "./mock-backend";
 import { type HostProbe, StaticProbe, TailscaleProbe, tailscaleIPv4 } from "./probe";
+import { ResourceMonitor } from "./resources";
 import { PodService } from "./service";
-import { SshShell } from "./shell";
+import { type MachineShell, SshShell } from "./shell";
 import { Sources } from "./sources";
 import { JobStore, PodStore } from "./stores";
 import { Templates } from "./templates";
@@ -38,6 +39,8 @@ export interface ControllerOptions {
   /** Time limit per workspace hook (panem.json "hooks"), in seconds (default 120; tests). */
   workspaceHookTimeoutSec?: number;
   log?: (msg: string) => void;
+  /** Runs the resource monitor's commands on machines (tests); default SSH, or the mock's. */
+  resourceShell?: MachineShell;
 }
 
 export async function createController(o: ControllerOptions) {
@@ -96,7 +99,20 @@ export async function createController(o: ControllerOptions) {
     log: o.log,
   });
   await service.loadShippedAgents();
-  return { app, service, backend, workspace, credentials };
+  // Machine and pod resource usage, and pods' leftover volumes (see resources.ts).
+  const resources = new ResourceMonitor({
+    shell:
+      o.resourceShell ??
+      (backend instanceof MockBackend ? new MockResourceShell(backend) : new SshShell()),
+    machines: () => service.resourceMachines(),
+    pods: () => service.resourcePods(),
+    thresholds: () => o.config.resources,
+    onChange: () => void service.resourcesChanged(),
+    log: o.log ?? ((m) => console.log(`[panem] ${m}`)),
+    dataDir: dir,
+  });
+  service.attachResources(resources);
+  return { app, service, backend, workspace, credentials, resources };
 }
 
 async function seededMock(): Promise<MockBackend> {
@@ -142,7 +158,7 @@ export function serveOptions(ctl: {
 
 export async function serve(config: Config, configPath?: string) {
   const ctl = await createController({ config, configPath });
-  const { service, backend } = ctl;
+  const { service, backend, resources } = ctl;
   if (backend instanceof DevPodBackend) {
     // Panem scopes git access itself: stop DevPod adding all ~/.ssh keys to forwarded agents
     // and forwarding the controller's git credential store to pods.
@@ -176,6 +192,8 @@ export async function serve(config: Config, configPath?: string) {
   };
   await poll();
   const timer = setInterval(poll, 5000);
+  // Resource usage runs on its own timers, so it never holds up the poll above.
+  resources.start();
   // Make sure every reachable machine runs the matching forwarder (idempotent).
   if (config.relaySecret && config.forwarderToken) {
     for (const m of service.machines().filter((x) => x.status !== "offline")) {
@@ -211,6 +229,7 @@ export async function serve(config: Config, configPath?: string) {
 
   const stop = async () => {
     clearInterval(timer);
+    resources.stop();
     clearInterval(tsTimer);
     for (const s of servers) s.stop();
     process.exit(0);

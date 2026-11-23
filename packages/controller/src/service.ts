@@ -43,6 +43,7 @@ import { LoginSessions } from "./logins";
 import { shippedAgents } from "./machine-assets";
 import { BEFORE_DESTROY_SCRIPT, bashCommand } from "./pod/scripts";
 import type { HostProbe } from "./probe";
+import type { ResourceMonitor, ResourcePod } from "./resources";
 import type { Sources } from "./sources";
 import type { JobStore, PodStore } from "./stores";
 import { syncIn } from "./sync-in";
@@ -95,6 +96,19 @@ export interface ServiceDeps {
   hookTimeoutSec?: number;
   log?: (msg: string) => void;
 }
+
+/** What the service needs of the resource monitor (attachResources). */
+export type Resources = Pick<
+  ResourceMonitor,
+  | "machine"
+  | "pod"
+  | "dindOf"
+  | "podVolumes"
+  | "removeVolumes"
+  | "queueRemoval"
+  | "orphans"
+  | "prune"
+>;
 
 interface FwdInfo {
   status: ForwarderStatus;
@@ -306,8 +320,108 @@ export class PodService {
     const pods = this.podList();
     return this.machineCache.map((m) => {
       const logins = machineLogins(m.name, pods, this.shipped);
-      return logins.length ? { ...m, logins } : m;
+      const resources = this.resources?.machine(m.name);
+      return {
+        ...m,
+        ...(logins.length ? { logins } : {}),
+        ...(resources ? { resources } : {}),
+      };
     });
+  }
+
+  // ---------- resources (see resources.ts) ----------
+
+  private resources?: Resources;
+
+  attachResources(r: Resources): void {
+    this.resources = r;
+  }
+
+  /** Machines the resource monitor measures. */
+  resourceMachines() {
+    return this.machineCache.map((m) => ({
+      name: m.name,
+      host: m.host,
+      user: m.user,
+      status: m.status,
+    }));
+  }
+
+  /** Pods as the resource monitor sees them: with the backend's uid and recorded volumes. */
+  resourcePods(): ResourcePod[] {
+    const uid = new Map(this.backendPods.map((b) => [b.id, b.uid]));
+    return this.d.pods.all().map((p) => ({
+      id: p.id,
+      machine: p.machine,
+      uid: uid.get(p.id),
+      volumes: p.volumes,
+    }));
+  }
+
+  /**
+   * New numbers: record any pod's own DinD volume not recorded yet (so it can be removed with
+   * the pod even if its machine is unreachable then), and publish.
+   */
+  async resourcesChanged(): Promise<void> {
+    for (const p of this.resourcePods()) {
+      if (p.volumes?.length || !p.uid) continue;
+      const vols = this.resources?.dindOf(p.machine, p.uid);
+      const meta = this.d.pods.get(p.id);
+      if (vols && meta) await this.d.pods.put({ ...meta, volumes: vols });
+    }
+    this.publishPods();
+  }
+
+  private machineRef(name: string) {
+    return this.resourceMachines().find((m) => m.name === name);
+  }
+
+  /** A pod's own volumes: recorded ones, plus what its container mounts now (if reachable). */
+  private async podVolumes(meta: PodMeta | undefined, id: string): Promise<string[]> {
+    const vols = new Set(meta?.volumes ?? []);
+    const machine = meta?.machine ?? this.backendPods.find((b) => b.id === id)?.machine;
+    const m = machine ? this.machineRef(machine) : undefined;
+    const uid = this.backendPods.find((b) => b.id === id)?.uid;
+    if (this.resources && m && uid && m.status !== "offline") {
+      try {
+        for (const v of await this.resources.podVolumes(m, uid)) vols.add(v);
+      } catch (e) {
+        this.log(`${id}: couldn't read its volumes: ${msg(e)}`);
+      }
+    }
+    return [...vols];
+  }
+
+  /** After `devpod delete`: remove the pod's own volumes now, or once its machine is back. */
+  private async removePodVolumes(machine: string | undefined, id: string, vols: string[]) {
+    if (!this.resources || !machine || vols.length === 0) return;
+    const m = this.machineRef(machine);
+    if (!m || m.status === "offline") {
+      await this.resources.queueRemoval(machine, vols);
+      this.log(`${id}: its volume(s) will be removed when ${machine} is back`);
+      return;
+    }
+    await this.resources.removeVolumes(m, vols).catch(async (e) => {
+      this.log(`${id}: removing its volume(s) failed (will retry): ${msg(e)}`);
+      await this.resources?.queueRemoval(machine, vols);
+    });
+  }
+
+  /** Unused DinD volumes on a machine that no pod recorded (to prune). */
+  async orphanVolumes(name: string) {
+    const m = this.machineRef(name);
+    if (!m) throw new HttpError(404, `machine ${name} not registered`);
+    if (!this.resources) throw new HttpError(409, "resource usage isn't collected");
+    if (m.status === "offline") throw new HttpError(409, `machine ${name} is offline`);
+    return this.resources.orphans(m);
+  }
+
+  async pruneVolumes(name: string, volumes: string[]) {
+    const m = this.machineRef(name);
+    if (!m) throw new HttpError(404, `machine ${name} not registered`);
+    if (!this.resources) throw new HttpError(409, "resource usage isn't collected");
+    if (m.status === "offline") throw new HttpError(409, `machine ${name} is offline`);
+    return this.resources.prune(m, volumes);
   }
 
   private machineStatus(name: string): MachineStatus {
@@ -443,10 +557,13 @@ export class PodService {
   private toPod(meta: PodMeta): Pod {
     const op = this.ops.get(meta.id);
     const machineStatus = this.machineStatus(meta.machine);
+    const uid = this.backendPods.find((p) => p.id === meta.id)?.uid;
+    const resources = this.resources?.pod({ id: meta.id, machine: meta.machine, uid });
     const ports = {
       ...this.servicesFor(meta),
       // Pods from before agents were pluggable always had Claude Code.
       agents: meta.agents ?? LEGACY_AGENTS,
+      ...(resources ? { resources } : {}),
     };
     if (op) {
       return {
@@ -946,7 +1063,10 @@ export class PodService {
       throw new HttpError(409, `pod ${id} is busy (${op.state})`);
     }
     if (force) {
+      const meta = this.d.pods.get(id);
+      const vols = await this.podVolumes(meta, id);
       await this.d.backend.delete(id, { force: true });
+      await this.removePodVolumes(meta?.machine ?? pod.machine, id, vols);
       await this.forget(id);
       return undefined;
     }
@@ -1068,7 +1188,10 @@ export class PodService {
         }
       }
       this.setOp(job.podId, { state: "deleting" });
+      // The pod's own DinD volume: devpod delete leaves it behind.
+      const vols = await this.podVolumes(meta, job.podId);
       await this.d.backend.delete(job.podId);
+      await this.removePodVolumes(meta?.machine, job.podId, vols);
       await update({ status: "done" });
       await this.forget(job.podId);
     } catch (e) {

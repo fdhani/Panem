@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Config, saveConfig } from "@panem/core";
 import type { Forwarders } from "../src/forwarders";
 import type { GitAccess } from "../src/git-access";
-import { MockBackend } from "../src/mock-backend";
+import { MockBackend, MockResourceShell } from "../src/mock-backend";
 import { StaticProbe } from "../src/probe";
 import { createController } from "../src/server";
 
@@ -73,11 +73,18 @@ export async function makeController(opts: {
   git?: GitAccess;
 }) {
   const backend = new MockBackend();
+  const resourceShell = new MockResourceShell(backend);
   await backend.addMachine({ name: "m-vps", host: "vps" });
   await backend.addMachine({ name: "m-mac", host: "mac" });
   const probe = new StaticProbe({ vps: "online", mac: "online" });
   const config: Config = {
     forwarder: { portRange: [7600, 7699], controlPort: 7599, blockSize: 10 },
+    resources: {
+      lowMemPercent: 10,
+      lowMemBytes: 2 * 1024 ** 3,
+      lowDiskPercent: 10,
+      lowDiskBytes: 10 * 1000 ** 3,
+    },
     workspaceDir: opts.dir,
     apiToken: TOKEN,
     claudeOauthToken: "oauth-xyz",
@@ -102,6 +109,7 @@ export async function makeController(opts: {
     hookTimeoutSec: opts.hookTimeoutSec,
     workspaceHookTimeoutSec: opts.workspaceHookTimeoutSec,
     git: opts.git,
+    resourceShell,
     log: (m) => logs.push(m),
   });
   await ctl.service.refresh();
@@ -111,7 +119,7 @@ export async function makeController(opts: {
       headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  return { ...ctl, backend, probe, dataDir, req, logs };
+  return { ...ctl, backend, probe, dataDir, req, logs, resourceShell };
 }
 
 /** Wait until the predicate holds (pods settle asynchronously). */

@@ -322,6 +322,51 @@ const machine = defineCommand({
         console.log(`forwarder ${st.status}`);
       },
     }),
+    prune: defineCommand({
+      meta: {
+        name: "prune",
+        description:
+          "List Docker-in-Docker volumes on a machine that no container uses and no pod recorded, and delete them after asking",
+      },
+      args: {
+        name: { type: "positional", required: true },
+        yes: { type: "boolean", description: "Don't ask" },
+      },
+      async run({ args }) {
+        const c = await client();
+        const raw = String(args.name);
+        const name = encodeURIComponent(raw.startsWith("m-") ? raw : `m-${raw}`);
+        const list = await c.call<{ name: string; size?: number }[]>(
+          "GET",
+          `/api/machines/${name}/orphans`,
+        );
+        if (list.length === 0) {
+          console.log(`No unused Docker-in-Docker volumes on ${raw}.`);
+          return;
+        }
+        const total = list.reduce((a, v) => a + (v.size ?? 0), 0);
+        console.log(table([["VOLUME", "SIZE"], ...list.map((v) => [v.name, bytes(v.size)])]));
+        console.log(`\n${list.length} unused volume(s), ${bytes(total)} in all.`);
+        if (!args.yes) {
+          process.stdout.write("Delete them? [y/N] ");
+          const answer = await new Promise<string>((resolve) => {
+            process.stdin.once("data", (d) => resolve(String(d)));
+          });
+          process.stdin.pause();
+          if (!/^y(es)?$/i.test(answer.trim())) {
+            console.log("Nothing deleted.");
+            return;
+          }
+        }
+        const r = await c.call<{
+          removed: { name: string; size?: number }[];
+          skipped: { name: string; reason: string }[];
+        }>("POST", `/api/machines/${name}/prune`, { volumes: list.map((v) => v.name) });
+        const freed = r.removed.reduce((a, v) => a + (v.size ?? 0), 0);
+        console.log(`Deleted ${r.removed.length} volume(s), freeing ${bytes(freed)}.`);
+        for (const s of r.skipped) console.log(`Kept ${s.name}: ${s.reason}`);
+      },
+    }),
     login: defineCommand({
       meta: { name: "login", description: "Same as `panem agent-login <machine> [agent]`" },
       args: {
@@ -344,6 +389,19 @@ const machine = defineCommand({
     }),
   },
 });
+
+/** Bytes as Docker shows them (decimal units). */
+function bytes(n?: number): string {
+  if (n === undefined) return "?";
+  const units = ["B", "kB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)}${units[i]}`;
+}
 
 const LOGIN_STATE_TEXT: Record<MachineLogin["state"], string> = {
   "signed-in": "signed in",

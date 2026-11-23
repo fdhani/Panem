@@ -308,6 +308,7 @@ export class DevPodBackend implements PodBackend {
         id: e.id,
         machine: e.provider,
         status: await this.status(e.id),
+        ...(e.uid ? { uid: e.uid } : {}),
       })),
     );
   }
@@ -558,7 +559,7 @@ type Json = Record<string, unknown>;
 const obj = (v: unknown): Json => (v && typeof v === "object" ? (v as Json) : {});
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
-export function parseList(raw: string): { id: string; provider: string }[] {
+export function parseList(raw: string): { id: string; provider: string; uid?: string }[] {
   if (!raw) return [];
   const arr = JSON.parse(raw);
   if (!Array.isArray(arr)) throw new BackendError("unexpected devpod list output");
@@ -566,7 +567,8 @@ export function parseList(raw: string): { id: string; provider: string }[] {
     .map((e) => {
       const o = obj(e);
       const provider = str(obj(o.provider).name) ?? str(o.provider) ?? "";
-      return { id: str(o.id) ?? "", provider };
+      const uid = str(o.uid);
+      return { id: str(o.id) ?? "", provider, ...(uid ? { uid } : {}) };
     })
     .filter((e) => e.id && e.provider.startsWith(MACHINE_PREFIX));
 }

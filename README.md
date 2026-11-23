@@ -144,6 +144,17 @@ At each summon Panem starts a short-lived ssh-agent of its own, loaded with **on
 
 **DevPod settings Panem changes:** at startup, `panem serve` sets `SSH_ADD_PRIVATE_KEYS=false` and `SSH_INJECT_GIT_CREDENTIALS=false` on DevPod's context, and its own `devpod ssh` calls pass `--start-services=false`. Otherwise DevPod would load every key in `~/.ssh` into any forwarded agent, and forward the controller's whole git credential store to pods. These settings also apply to other DevPod use by the same user.
 
+## Resource usage
+
+Each machine's page shows its RAM and Docker disk, and each pod's page what that pod uses. The Machines list and the Summon page show what's free, and warn when a machine is low (under 10% or 2 GiB of RAM, or 10% or 10 GB of Docker disk; set `resources` in `config.json` to change that).
+
+- **Machine RAM** is `MemAvailable` from `/proc/meminfo` (what can be used without swapping), not `MemFree`. **Docker disk** is the filesystem holding Docker's data (`docker info` → `DockerRootDir`), the one pods fill.
+- **Pod RAM** is the pod container's, from `docker stats`. Containers the agent starts inside the pod (Docker-in-Docker) are included.
+- **Pod storage** is the files changed in the pod's container plus its own Docker-in-Docker volume (images and containers pulled inside it). The workspace folder, the shared sign-in volume and the base image (shared by pods, shown once on the machine) aren't counted.
+- Collected over the same shell as forwarder deploys (directly for `local`, SSH otherwise): RAM every 15 s, storage every 60 s (every 5 minutes on a machine where that takes longer than 10 s). It never holds up pod state or port updates.
+
+**Docker-in-Docker volumes:** `devpod delete` leaves a pod's `dind-var-lib-docker-*` volume behind. Panem records each pod's volume (from its container's mounts) and removes it after deleting the pod; if the machine is unreachable then, it's removed when the machine is back. Volumes left from before, or from DevPod workspaces made outside Panem, show on the machine's page as unused, with **Clean up…**, or: `panem machine prune <machine>` (asks first). Other named volumes a template declares are never removed.
+
 ## Reaching pod services (ports)
 
 Each machine runs one `panem-forwarder` container, which the controller deploys over SSH. It publishes ports **only on that machine's Tailscale IP**, so traffic goes straight to the machine without passing through the home server.
@@ -338,6 +349,7 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 - SSH keys with a passphrase can't be used: Panem can't unlock them unattended.
 - Forwarding Panem's scoped agent into `devpod ssh` with `--start-services=false` is tested with a fake DevPod. Check it on a real pod with a private repo.
 - **Builds take turns.** DevPod builds straight from the workspace folder on the controller's own machine, so a `devpod up` holds the workspace while it builds. Memory saves, workspace hooks and other summons wait for it (setup, such as cloning repos, still runs in parallel). A build that fails before any container exists is retried once; both attempts are in the pod's log. Unverified on real DevPod: that `devpod status` reports NotFound after a failed build, and that the retry builds cleanly.
+- **Resource usage on macOS hosts isn't shown yet:** with Docker Desktop, containers run in a VM, so the Mac's own memory and disk figures would be misleading. Unverified on a busy machine: how long `docker system df -v` and `docker ps -s` take (storage is measured less often when they're slow).
 - Back up `~/.devpod` on the controller. If it is lost, re-add the machines; pods that DevPod lists again can be re-labelled with `panem rediscover`.
 - Using one Claude subscription on several machines at once: check Anthropic's terms.
 - **macOS hosts (Docker Desktop):** publishing on the Tailscale IP and reaching pod containers by their Docker IP need a real check.

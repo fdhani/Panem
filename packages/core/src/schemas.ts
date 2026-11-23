@@ -173,6 +173,41 @@ export const MachineLogin = z.object({
 });
 export type MachineLogin = z.infer<typeof MachineLogin>;
 
+/** A machine's resources, in bytes (from its own /proc/meminfo, df and docker). */
+export const MachineResources = z.object({
+  at: z.string(),
+  /** `uname -s`: Linux, or Darwin (not measured yet). */
+  os: z.string().optional(),
+  mem: z.object({ total: z.number(), available: z.number() }).optional(),
+  /** The filesystem holding Docker's data (DockerRootDir): what pods fill. */
+  disk: z.object({ path: z.string(), total: z.number(), free: z.number() }).optional(),
+  /** All of Panem's pods here: RAM in use, and storage (writable layers + their own volumes). */
+  pods: z.object({ mem: z.number(), storage: z.number() }).optional(),
+  /** Images the pods are built from, each counted once (shared, so not in pod figures). */
+  sharedImages: z.number().optional(),
+  /** Docker-in-Docker volumes no container uses that Panem didn't record (prune to free). */
+  orphans: z.object({ count: z.number(), bytes: z.number() }).optional(),
+  /** Below the low thresholds (config "resources"). */
+  low: z.object({ mem: z.boolean(), disk: z.boolean() }).optional(),
+  /** The last collection failed: these numbers are from an earlier one. */
+  stale: z.boolean().optional(),
+  error: z.string().optional(),
+});
+export type MachineResources = z.infer<typeof MachineResources>;
+
+/** One pod's resources, in bytes. */
+export const PodResources = z.object({
+  at: z.string(),
+  /** RAM in use by the pod's container, including containers run inside it (Docker-in-Docker). */
+  mem: z.number().optional(),
+  /** Files changed in the pod's container (its writable layer, not the shared image). */
+  writable: z.number().optional(),
+  /** The pod's own Docker-in-Docker volume: images and containers pulled inside the pod. */
+  dind: z.number().optional(),
+  stale: z.boolean().optional(),
+});
+export type PodResources = z.infer<typeof PodResources>;
+
 export const Machine = z.object({
   /** DevPod provider name, e.g. m-vps. */
   name: z.string(),
@@ -183,6 +218,7 @@ export const Machine = z.object({
   forwarder: ForwarderStatus.optional(),
   /** Agents' sign-ins on this machine. */
   logins: z.array(MachineLogin).optional(),
+  resources: MachineResources.optional(),
 });
 export type Machine = z.infer<typeof Machine>;
 
@@ -224,6 +260,11 @@ export const PodMeta = z.object({
   hooks: TemplateHooks.optional(),
   /** Agents installed in the pod, read after its start hook. Absent on older pods. */
   agents: z.array(AgentInfo).optional(),
+  /**
+   * Docker volumes that belong to this pod alone, found on its container (its Docker-in-Docker
+   * volume). Removed with the pod.
+   */
+  volumes: z.array(z.string()).optional(),
 });
 export type PodMeta = z.infer<typeof PodMeta>;
 
@@ -249,6 +290,7 @@ export const Pod = PodMeta.extend({
   services: z.array(PodServicePort).default([]),
   /** Slot 0: an index page listing the pod's services. */
   indexUrl: z.string().optional(),
+  resources: PodResources.optional(),
 });
 export type Pod = z.infer<typeof Pod>;
 
@@ -297,6 +339,21 @@ export const Config = z.object({
       portRange: z.tuple([PortNumber, PortNumber]).default([7600, 7699]),
       controlPort: PortNumber.default(7599),
       blockSize: z.number().int().min(2).max(100).default(10),
+    })
+    .default({}),
+  /** When a machine counts as low on RAM or Docker disk (either threshold). */
+  resources: z
+    .object({
+      lowMemPercent: z.number().min(0).max(100).default(10),
+      lowMemBytes: z
+        .number()
+        .min(0)
+        .default(2 * 1024 ** 3),
+      lowDiskPercent: z.number().min(0).max(100).default(10),
+      lowDiskBytes: z
+        .number()
+        .min(0)
+        .default(10 * 1000 ** 3),
     })
     .default({}),
 });

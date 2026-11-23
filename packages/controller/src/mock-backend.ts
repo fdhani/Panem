@@ -130,7 +130,12 @@ export class MockBackend implements PodBackend {
   }
 
   async list(): Promise<BackendPod[]> {
-    return [...this.pods.values()].map((p) => ({ id: p.id, machine: p.machine, status: p.status }));
+    return [...this.pods.values()].map((p) => ({
+      id: p.id,
+      machine: p.machine,
+      status: p.status,
+      uid: mockUid(p.id),
+    }));
   }
 
   async start(id: string, opts: { withFolder?: FolderLock } = {}) {
@@ -284,6 +289,111 @@ function fail(stderr: string): ExecResult {
  * Fake forwarders for PANEM_BACKEND=mock: each running pod "listens" on its template's named
  * ports plus 5173, 8000 and 5432, and ports are published once switched on.
  */
+/** DevPod-style workspace uid for a mock pod. */
+export const mockUid = (id: string) => `default-${id}`;
+/** A stable small number per pod id, for varied mock figures. */
+const seed = (id: string) => Number(BigInt(Bun.hash(id)) % 1_000_000n);
+const shortId = (id: string) => Bun.hash(id).toString(16).padStart(12, "0").slice(0, 12);
+
+/**
+ * A machine shell for mock mode: answers the resource monitor's scripts from the mock pods,
+ * and keeps Docker-in-Docker volumes per machine. Like DevPod, deleting a mock pod leaves its
+ * volume behind; two volumes from "earlier" pods are there from the start.
+ */
+export class MockResourceShell {
+  /** machine host -> volume name -> size */
+  volumes = new Map<string, Map<string, number>>();
+
+  constructor(private readonly backend: MockBackend) {}
+
+  private vols(host: string) {
+    let v = this.volumes.get(host);
+    if (!v) {
+      v = new Map([
+        ["dind-var-lib-docker-default-old-a1b2c3", 3_400_000_000],
+        ["dind-var-lib-docker-default-old-d4e5f6", 820_000_000],
+      ]);
+      this.volumes.set(host, v);
+    }
+    return v;
+  }
+
+  private podsOn(host: string) {
+    const m = this.backend.machinesList.find((x) => x.host === host);
+    return [...this.backend.pods.values()].filter((p) => p.machine === m?.name);
+  }
+
+  async run(m: { host: string }, argv: string[]) {
+    const script = argv.at(-1) ?? "";
+    const pods = this.podsOn(m.host);
+    const vols = this.vols(m.host);
+    for (const p of pods) {
+      const v = `dind-var-lib-docker-${mockUid(p.id)}`;
+      if (!vols.has(v)) vols.set(v, 600_000_000 + (seed(p.id) % 900) * 1_000_000);
+    }
+    const ok = (stdout: string) => ({ code: 0, stdout, stderr: "" });
+    const mounts = (p: { id: string }) =>
+      `${shortId(p.id)}${"0".repeat(52)}\tbind||/workspaces/${p.id};volume|panem-logins|/var/lib/panem/logins;volume|dind-var-lib-docker-${mockUid(p.id)}|/var/lib/docker;`;
+    if (script.includes("@@panem:mem")) {
+      const running = pods.filter((p) => p.status === "running");
+      return ok(
+        [
+          "@@panem:os",
+          "Linux",
+          "@@panem:mem",
+          `MemTotal:       ${16 * 1024 * 1024} kB`,
+          `MemAvailable:   ${Math.max(1, 11_900_000 - running.length * 700_000)} kB`,
+          "@@panem:pods",
+          ...running.map((p) => `${shortId(p.id)}\t${mockUid(p.id)}`),
+          "@@panem:stats",
+          ...running.map((p) => `${shortId(p.id)}\t${200 + (seed(p.id) % 600)}.4MiB / 15.5GiB`),
+          "",
+        ].join("\n"),
+      );
+    }
+    if (script.includes("@@panem:volumes")) {
+      const used = new Set(pods.map((p) => `dind-var-lib-docker-${mockUid(p.id)}`));
+      return ok(
+        [
+          "@@panem:root",
+          "/var/lib/docker",
+          "@@panem:df",
+          "Filesystem     1024-blocks      Used Available Capacity Mounted on",
+          "/dev/nvme0n1p2   479595076 334507228 120654848      74% /",
+          "@@panem:ps",
+          ...pods.map(
+            (p) =>
+              `${shortId(p.id)}\t${mockUid(p.id)}\tvsc-example-1a2b3c:devpod\t${(1 + (seed(p.id) % 9) / 10).toFixed(2)}GB (virtual 3.13GB)`,
+          ),
+          "@@panem:mounts",
+          ...pods.map(mounts),
+          "@@panem:volumes",
+          JSON.stringify(
+            [...vols].map(([name, size]) => ({
+              Name: name,
+              Links: used.has(name) ? "1" : "0",
+              Size: `${(size / 1e9).toFixed(2)}GB`,
+            })),
+          ),
+          "",
+        ].join("\n"),
+      );
+    }
+    const uid = script.match(/label=dev\.containers\.id=(\S+?)\)/)?.[1];
+    if (uid) {
+      const p = pods.find((x) => mockUid(x.id) === uid);
+      return ok(p ? `${mounts(p)}\n` : "");
+    }
+    const rm = script.match(/docker volume rm (\S+)/)?.[1];
+    if (rm) {
+      if (pods.some((p) => `dind-var-lib-docker-${mockUid(p.id)}` === rm)) return ok("in-use\n");
+      vols.delete(rm);
+      return ok("removed\n");
+    }
+    return { code: 1, stdout: "", stderr: "mock shell: unexpected command" };
+  }
+}
+
 export class MockForwarders {
   readonly enabled = true;
   private blocks = new Map<string, number>();
