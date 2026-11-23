@@ -51,19 +51,21 @@ function AgentCard({
     });
   return (
     <Card className="flex flex-col gap-3 p-4">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-        <h3 className="font-medium">{login.label}</h3>
-        <Badge tone={st.tone}>{st.label}</Badge>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <h3 className="font-medium">{login.label}</h3>
+          <Badge tone={st.tone}>{st.label}</Badge>
+        </div>
         {canSignIn && (
-          <span className="ml-auto">
+          <div className="shrink-0">
             <SignInButton
               scope={{ machine: machine.name, agent: login.agent, label: login.loginLabel }}
               variant={login.state === "signed-in" ? "ghost" : "primary"}
               title={`${login.loginLabel} on ${where}, for every pod there`}
             >
-              {login.state === "signed-in" ? "Sign in again" : login.loginLabel}
+              {login.state === "signed-in" ? "Sign in again" : "Sign in"}
             </SignInButton>
-          </span>
+          </div>
         )}
       </div>
       <p className="text-xs text-muted">

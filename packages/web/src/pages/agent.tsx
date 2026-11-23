@@ -95,7 +95,7 @@ export function AgentPage() {
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <SignInButton scope={{ machine: pod.machine, agent: a.id, label: a.login.label }}>
-                  {a.login.label} on {where}
+                  Sign in on {where}
                 </SignInButton>
               </div>
             </>

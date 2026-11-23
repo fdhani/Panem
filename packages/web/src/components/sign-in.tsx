@@ -46,7 +46,7 @@ export function SignInButton({
         <LogIn /> {children ?? scope.label}
       </Button>
       {start.error && (
-        <p className="basis-full text-xs break-words text-bad">{start.error.message}</p>
+        <p className="mt-1 max-w-64 text-xs break-words text-bad">{start.error.message}</p>
       )}
       {session && (
         <SignInDialog scope={scope} session={session} onClose={() => setSession(undefined)} />
