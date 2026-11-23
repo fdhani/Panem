@@ -54,6 +54,8 @@ export interface PodBackend {
   stop(id: string): Promise<void>;
   delete(id: string, opts?: { force?: boolean }): Promise<void>;
   exec(id: string, command: string, opts?: { sshAuthSock?: string }): Promise<ExecResult>;
+  /** The saved output of the pod's last `up` (and failed setup), if the backend keeps it. */
+  log?(id: string): Promise<string | undefined>;
   /** Run `command` in the pod with `data` on its stdin (e.g. a tar to unpack). */
   upload(id: string, data: Uint8Array, command: string): Promise<ExecResult>;
   /**
@@ -68,6 +70,8 @@ export interface PodBackend {
 }
 
 export class BackendError extends Error {
+  /** The last lines of the command's output (escape codes stripped), for diagnosing it. */
+  detail?: string[];
   constructor(
     message: string,
     readonly stderr = "",

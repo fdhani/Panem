@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Pod } from "@panem/core";
 import { makeController, makeWorkspace, until } from "./helpers";
@@ -134,4 +134,80 @@ describe("agents", () => {
     await until(() => c2.service.get(pod.id).state === "running");
     expect(ctl.backend.pods.get(pod.id)!.env.OPENAI_API_KEY).toBe("v2");
   });
+});
+
+describe("agent status and sign-in (agent-neutral)", () => {
+  test("statuses agents report are read into the pod; restart re-reads them", async () => {
+    const ws = makeWorkspace();
+    const ctl = await makeController(ws);
+    ctl.backend.agentsJson = JSON.stringify([
+      {
+        id: "claude-code",
+        label: "Claude Code",
+        connect: [],
+        login: {
+          label: "Sign in to Claude",
+          command: "claude auth login",
+          share: [".claude/.credentials.json"],
+        },
+      },
+      { id: "codex", label: "Codex", connect: [] },
+    ]);
+    const pod = await summon(ctl, "shop");
+    const status = (id: string, state: string, message = "") =>
+      ctl.backend.writePodFile(
+        pod.id,
+        `~/.panem/agents/${id}.status.json`,
+        JSON.stringify({ id, state, message, at: "2026-01-01T00:00:00Z" }),
+      );
+    status("claude-code", "needs-login", "Remote Control needs a claude.ai sign-in");
+    status("codex", "running");
+    const res = await ctl.req("POST", `/api/pods/${pod.id}/agents/claude-code/restart`);
+    expect(res.status).toBe(200);
+    const agents = ((await res.json()) as Pod).agents!;
+    expect(agents.map((a) => [a.id, a.status?.state, a.login?.label])).toEqual([
+      ["claude-code", "needs-login", "Sign in to Claude"],
+      ["codex", "running", undefined],
+    ]);
+    expect(agents[0]!.status?.message).toContain("claude.ai sign-in");
+    expect((await ctl.req("POST", `/api/pods/${pod.id}/agents/nope/restart`)).status).toBe(404);
+  });
+
+  test("templates using Panem's agent Features get the machine's sign-in volume, once", async () => {
+    const ws = makeWorkspace();
+    ws.pushFrom(
+      "t",
+      "templates/shop/.devcontainer/devcontainer.json",
+      JSON.stringify({ image: "base", features: { "./panem-features/claude-code": {} } }),
+    );
+    const ctl = await makeController(ws);
+    const pod = await summon(ctl, "shop");
+    expect(pod.state).toBe("running");
+    const gen = JSON.parse(
+      readFileSync(join(ws.dir, ctl.backend.lastUp!.devcontainerPath), "utf8"),
+    ) as { mounts: unknown[] };
+    expect(gen.mounts).toEqual([
+      { source: "panem-logins", target: "/var/lib/panem/logins", type: "volume" },
+    ]);
+  });
+});
+
+test("an agent's own log is returned as it is (agent.json log)", async () => {
+  const ws = makeWorkspace();
+  const ctl = await makeController(ws);
+  ctl.backend.agentsJson = JSON.stringify([
+    { id: "claude-code", label: "Claude Code", connect: [], log: "~/.panem/remote-control.log" },
+    { id: "quiet", label: "Quiet", connect: [] },
+  ]);
+  const pod = await summon(ctl, "shop");
+  ctl.backend.writePodFile(
+    pod.id,
+    "~/.panem/remote-control.log",
+    "Error: Remote Control requires a full-scope login token.\n",
+  );
+  const res = await ctl.req("GET", `/api/pods/${pod.id}/agents/claude-code/log`);
+  expect(res.status).toBe(200);
+  expect(await res.text()).toContain("requires a full-scope login token");
+  expect((await ctl.req("GET", `/api/pods/${pod.id}/agents/quiet/log`)).status).toBe(404);
+  expect((await ctl.req("GET", `/api/pods/${pod.id}/agents/nope/log`)).status).toBe(404);
 });

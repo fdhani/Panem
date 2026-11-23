@@ -46,7 +46,7 @@ deploy/install.sh                           # ~/.local/bin/panem + systemd user 
 panem init                                  # this controller: API token and secrets
 mkdir ~/panem-workspace && cd ~/panem-workspace
 panem workspace init                        # this folder is the workspace (adds an example template)
-claude setup-token                          # long-lived token so pods start logged in
+claude setup-token                          # long-lived token for model requests in pods
 panem env set CLAUDE_CODE_OAUTH_TOKEN       # paste it at the hidden prompt (or use Settings in the UI)
 systemctl --user enable --now panem
 panem token                                 # paste into the web UI's Settings
@@ -93,7 +93,9 @@ With the folder as a git repo (`git init`, add a remote, push once), templates y
 
 ### Panem's Features
 
-Templates list Panem's devcontainer Features by a local path, e.g. `"./panem-features/claude-code"`. At every summon Panem writes them next to the template's `devcontainer.json`, in `panem-features/` (always the running version, with a `.gitignore` so a git-backed workspace stays clean), and DevPod uploads them with the workspace. Nothing has to be published to a registry. A template still listing `ghcr.io/fdhani/panem/claude-code:0` gets a warning on the Summon page: change it to the local path.
+Templates list Panem's devcontainer Features by a local path, e.g. `"./panem-features/claude-code"`. At every summon Panem writes them next to the template's `devcontainer.json`, in `panem-features/` (always the running version, with a `.gitignore` so a git-backed workspace stays clean), and DevPod uploads them with the workspace.
+
+DevPod reuses a built image when the config is unchanged, and the files of a local Feature don't count. So for templates listing `./panem-features/…`, Panem also writes `panem-features/devcontainer.json`: your config with relative paths adjusted, and a `panemBuild` option (a hash of Panem's Features) on each of them. That's the config DevPod builds from, so a Panem upgrade always builds a fresh image. Your `devcontainer.json` is never edited. As a safety net, setup checks that the pod's Features match. If they don't, the summon fails with "built from a cached image with older Panem Features" and how to clear it. Nothing has to be published to a registry. A template still listing `ghcr.io/fdhani/panem/claude-code:0` gets a warning on the Summon page: change it to the local path.
 
 ## How a pod is built
 
@@ -106,6 +108,20 @@ Templates list Panem's devcontainer Features by a local path, e.g. `"./panem-fea
 Panem starts nothing else. Templates shouldn't start databases or backends in `postStartCommand` either, since pods would then run them all the time. The agent starts them when a task needs them; the scaffolded `CLAUDE.md` tells it how ("Services"). If your templates do start services, drop that line. Ports a service opens appear on the pod card as usual, closed until you switch them on.
 
 Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.panem/`; DevPod's own copy of the workspace folder is in `/workspaces/<pod-id>/`, and Panem doesn't use it.
+
+## Signing agents in (Remote Control)
+
+**Remote Control needs a claude.ai sign-in.** The token from `claude setup-token` (`CLAUDE_CODE_OAUTH_TOKEN`) only covers model requests; Anthropic's docs say it "can't establish Remote Control sessions". Pods keep it for that, but Remote Control is started without it, because it would take precedence over a sign-in.
+
+**Sign in once per machine:**
+```bash
+panem pod login <pod-id>          # on the controller; from elsewhere: ssh -t <controller> panem pod login <pod-id>
+```
+- It opens Claude Code's own sign-in in your terminal (`claude auth login` in the pod): open the URL it prints, sign in, and paste the code back. Panem never sees the code or the login.
+- The login file is kept in a Docker volume on that machine (`panem-logins`), so every pod there signs in with it from its next start. Add `--all` to restart the agent in the machine's other running pods now.
+- Panem doesn't copy logins between machines: each machine signs in once.
+
+**The pod card shows each agent's state:** running; needs sign-in, with the command to run; or an error, with the agent's own message and a Retry button. This works the same for any agent Feature (see "Writing an agent Feature" in `features/README.md`).
 
 ## Private repos
 
@@ -310,7 +326,11 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 - Whether DevPod containers come back after a host reboot (restart policy) is untested. Pods may need `panem pod start` afterwards.
 - Copy-in uses stdin through `devpod ssh`, and falls back to sending base64 in chunks if stdin doesn't arrive. CI's integration test reports which path DevPod used. The in-pod scripts need GNU `tar` (Debian and Ubuntu images have it; busybox tar on Alpine doesn't support every flag they use).
 - Pods built from a Feature release before 0.3.0 still copy the default context during setup. That's harmless, but default paths a `panem.json` excludes will still appear on those pods.
-- Remote Control running headless with `CLAUDE_CODE_OAUTH_TOKEN` must be confirmed on a real pod. Its output is logged to `~/.panem/remote-control.log`.
+- **Shared sign-ins are untested with a real Claude login:**
+  - whether Claude Code's token refresh writes through the symlink into the machine's volume (if it replaces the file instead, that pod quietly keeps its own copy);
+  - whether several pods refreshing one login conflict;
+  - whether DevPod honours the generated config's `mounts`.
+  Remote Control output is logged to `~/.panem/remote-control.log` in the pod.
 - **SSH git access exists only during setup and before-destroy hooks.** The agent in a pod can't `git push` over SSH. Give repos it should push to an `https://` URL and a token.
 - SSH keys with a passphrase can't be used: Panem can't unlock them unattended.
 - Forwarding Panem's scoped agent into `devpod ssh` with `--start-services=false` is tested with a fake DevPod. Check it on a real pod with a private repo.

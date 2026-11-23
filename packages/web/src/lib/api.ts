@@ -59,6 +59,14 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   return data as T;
 }
 
+/** A text response (e.g. a pod's saved log); undefined when there's none (404). */
+export async function apiText(path: string): Promise<string | undefined> {
+  const res = await fetch(path, { headers: { authorization: `Bearer ${token()}` } });
+  if (res.status === 404) return undefined;
+  if (!res.ok) throw new ApiError(res.status, res.statusText);
+  return res.text();
+}
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

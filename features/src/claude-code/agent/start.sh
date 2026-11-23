@@ -7,17 +7,25 @@ set -euo pipefail
 # Options chosen in devcontainer.json (installed by install.sh).
 # shellcheck disable=SC1091
 [ -f "$(dirname "$0")/agent.env" ] && . "$(dirname "$0")/agent.env"
-CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 SESSION=panem-rc
-[ "${PANEM_REMOTE_CONTROL:-true}" = "true" ] || exit 0
-
-if ! command -v claude >/dev/null; then
-  log "claude not found on PATH; Remote Control not started"
+LOGFILE="$PANEM_STATE_DIR/remote-control.log"
+if [ "${PANEM_REMOTE_CONTROL:-true}" != "true" ]; then
+  agent_status stopped "Remote Control is turned off for this template"
   exit 0
 fi
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ ! -f "$CLAUDE_HOME/.credentials.json" ]; then
-  log "no CLAUDE_CODE_OAUTH_TOKEN and no stored login; Remote Control not started"
+if ! command -v claude >/dev/null; then
+  log "claude not found on PATH; Remote Control not started"
+  agent_status error "Claude Code isn't installed in this pod"
+  exit 0
+fi
+
+# Remote Control needs a claude.ai sign-in: a setup-token (CLAUDE_CODE_OAUTH_TOKEN) only covers
+# model requests, and when set it takes precedence over the sign-in, so it's left out here.
+method="$(env -u CLAUDE_CODE_OAUTH_TOKEN claude auth status --json 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)"
+if [ "$method" != "claude.ai" ]; then
+  log "Remote Control needs a claude.ai sign-in; not started"
+  agent_status needs-login "Remote Control needs a claude.ai sign-in (a setup-token only covers model requests)"
   exit 0
 fi
 
@@ -27,9 +35,17 @@ dir="$(primary_repo_dir)"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 mkdir -p "$PANEM_STATE_DIR"
-# Pass the token through tmux explicitly: the tmux server may predate the env.
 tmux new-session -d -s "$SESSION" -c "$dir" \
-  -e "CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e "PATH=$PATH" \
-  "claude remote-control --name '$name' --permission-mode '${PANEM_PERMISSION_MODE:-default}' 2>&1 | tee -a '$PANEM_STATE_DIR/remote-control.log'"
-log "Remote Control started in tmux session $SESSION ($dir)"
+  "env -u CLAUDE_CODE_OAUTH_TOKEN claude remote-control --name '$name' --permission-mode '${PANEM_PERMISSION_MODE:-default}' 2>&1 | tee -a '$LOGFILE'"
+
+# Remote Control exits at once when it can't start (e.g. sign-in rejected): say so on the card.
+sleep "${PANEM_RC_SETTLE_SECONDS:-5}"
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  agent_status running ""
+  log "Remote Control started in tmux session $SESSION ($dir)"
+else
+  why="$(grep -v '^\s*$' "$LOGFILE" 2>/dev/null | tail -n 1 || true)"
+  agent_status error "Remote Control stopped: ${why:-no output}"
+  log "Remote Control exited: $why"
+fi

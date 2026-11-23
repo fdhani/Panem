@@ -12,5 +12,12 @@
   "installsAfter": [
     "ghcr.io/devcontainers/features/common-utils",
     "ghcr.io/devcontainers/features/git"
-  ]
+  ],
+  "options": {
+    "panemBuild": {
+      "type": "string",
+      "default": "",
+      "description": "Set by Panem at each summon (a hash of its Features), so DevPod builds a new image whenever they change. Leave empty."
+    }
+  }
 }

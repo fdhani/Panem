@@ -1,13 +1,24 @@
 import type { Job, Pod } from "@panem/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, ExternalLink, GitBranch, Play, Plus, Square, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  ChevronRight,
+  ExternalLink,
+  GitBranch,
+  Play,
+  Plus,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
 import { type DeleteChoice, DeleteDialog } from "../components/delete-dialog";
 import { MachineDot, PodStateBadge } from "../components/status";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { api, keys, queryClient, useJobs, usePods } from "../lib/api";
+import { podIssue } from "../lib/pod-issue";
 import { timeAgo } from "../lib/utils";
 import { QueryError } from "./shared";
 
@@ -77,7 +88,13 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate font-mono text-[15px] font-medium">{pod.id}</p>
+          <Link
+            to="/pods/$id"
+            params={{ id: pod.id }}
+            className="block truncate font-mono text-[15px] font-medium hover:underline"
+          >
+            {pod.id}
+          </Link>
           <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
             <span>{pod.template}</span>
             <span aria-hidden>·</span>
@@ -115,9 +132,7 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
 
       {(pod.state === "running" || pod.services.length > 0) && <Services pod={pod} />}
 
-      {pod.error && (
-        <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">{pod.error}</p>
-      )}
+      <PodIssues pod={pod} />
       {action.error && (
         <p className="rounded-lg bg-bad/10 px-3 py-2 text-sm break-words text-bad">
           {action.error.message}
@@ -127,15 +142,18 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
       <div className="flex flex-wrap items-center gap-2">
         {pod.state === "running" && (
           <>
-            {(pod.agents ?? []).flatMap((a) =>
-              a.connect.map((c) => (
-                <a key={`${a.id}:${c.url}`} href={c.url} target="_blank" rel="noreferrer">
-                  <Button variant="primary" size="sm" title={a.label || a.id}>
-                    <ExternalLink /> {c.label}
-                  </Button>
-                </a>
-              )),
-            )}
+            {(pod.agents ?? [])
+              // Connect links only help when the agent is actually reachable.
+              .filter((a) => !a.status || a.status.state === "running")
+              .flatMap((a) =>
+                a.connect.map((c) => (
+                  <a key={`${a.id}:${c.url}`} href={c.url} target="_blank" rel="noreferrer">
+                    <Button variant="primary" size="sm" title={a.label || a.id}>
+                      <ExternalLink /> {c.label}
+                    </Button>
+                  </a>
+                )),
+              )}
             <Button
               size="sm"
               disabled={offline || action.isPending}
@@ -175,12 +193,7 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
         busy={action.isPending}
         saveFailed={exportFailed}
       />
-      {pod.state === "running" && (pod.agents ?? []).length > 0 && (
-        <p className="text-xs text-muted">
-          {(pod.agents ?? []).map((a) => a.label || a.id).join(", ")} · session{" "}
-          <span className="font-mono">{pod.id}</span>
-        </p>
-      )}
+
       {offline && (
         <p className="text-xs text-muted">
           Machine is offline. Deleting now skips its before-destroy hooks and memory.
@@ -190,7 +203,24 @@ function PodCard({ pod, job }: { pod: Pod; job?: Job }) {
   );
 }
 
-function Services({ pod }: { pod: Pod }) {
+function PodIssues({ pod }: { pod: Pod }) {
+  const issue = podIssue(pod);
+  if (!issue) return null;
+  return (
+    <Link
+      to="/pods/$id"
+      params={{ id: pod.id }}
+      className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${issue.tone === "bad" ? "bg-bad/10 text-bad" : "bg-warn/10 text-warn"}`}
+    >
+      <AlertTriangle className="size-4 shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{issue.text}</span>
+      <span className="shrink-0 font-medium">Details</span>
+      <ChevronRight className="size-4 shrink-0" />
+    </Link>
+  );
+}
+
+export function Services({ pod }: { pod: Pod }) {
   const running = pod.state === "running";
   const [adding, setAdding] = useState("");
   const toggle = useMutation({

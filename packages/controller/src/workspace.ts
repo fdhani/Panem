@@ -2,8 +2,31 @@ import { existsSync, statSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { PanemConfig, type WorkspaceHookName } from "@panem/core";
+import { derivedConfig } from "./devcontainer-config";
 import { Mutex } from "./git";
-import { panemFeatures } from "./machine-assets";
+import { featuresHash, panemFeatures } from "./machine-assets";
+
+/** One Docker volume per machine for agents' shared sign-ins (agent.json "login.share"). */
+export const LOGINS_MOUNT = {
+  source: "panem-logins",
+  target: "/var/lib/panem/logins",
+  type: "volume",
+};
+
+/** Whether any of these shipped agents keeps its sign-in in the machine's volume. */
+async function sharesLogins(ids: string[]): Promise<boolean> {
+  for (const f of await panemFeatures()) {
+    const m = /^([^/]+)\/agent\/agent\.json$/.exec(f.path);
+    if (!m || !ids.includes(m[1]!)) continue;
+    try {
+      const a = JSON.parse(new TextDecoder().decode(f.data)) as { login?: { share?: string[] } };
+      if (a.login?.share?.length) return true;
+    } catch {
+      // not ours to judge here
+    }
+  }
+  return false;
+}
 
 /** Folder next to a template's devcontainer.json where Panem keeps its Features up to date. */
 export const FEATURES_DIR = "panem-features";
@@ -159,6 +182,36 @@ export class Workspace {
         await writeFile(ignore, "# Written by Panem at each summon (its own Features).\n*\n");
       }
       return { written };
+    });
+  }
+
+  /**
+   * Make a template ready for DevPod: put Panem's Features in place and, when the template
+   * lists them, write the config DevPod should use (see derivedConfig) next to them. Returns
+   * that config's path (relative to the workspace) and the build it expects in the pod, or the
+   * template's own path when it doesn't use Panem's Features.
+   */
+  async prepareDevcontainer(devcontainerPath: string): Promise<{ path: string; build?: string }> {
+    await this.installFeatures(devcontainerPath);
+    return this.lock.run(async () => {
+      const root = resolve(await this.dir());
+      const raw = await readFile(join(root, devcontainerPath), "utf8").catch(() => undefined);
+      if (raw === undefined) return { path: devcontainerPath };
+      const build = await featuresHash();
+      let derived: ReturnType<typeof derivedConfig>;
+      try {
+        derived = derivedConfig(raw, build);
+        // Agents that keep their sign-in per machine get the machine's login volume, once.
+        if (derived && (await sharesLogins(derived.ids))) {
+          derived = derivedConfig(raw, build, { mounts: [LOGINS_MOUNT] });
+        }
+      } catch (e) {
+        throw new WorkspaceError(`${devcontainerPath}: not valid JSON: ${(e as Error).message}`);
+      }
+      if (!derived) return { path: devcontainerPath };
+      const path = join(dirname(devcontainerPath), FEATURES_DIR, "devcontainer.json");
+      await writeFile(join(root, path), derived.json);
+      return { path, build };
     });
   }
 }

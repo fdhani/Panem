@@ -5,13 +5,22 @@ export const SECRET = "relay-secret-0123456789";
 export class FakeDocker implements DockerApi {
   containers: ContainerInfo[] = [];
   joined: [string, string][] = [];
+  /** Networks joining fails for (e.g. a host network). */
+  refuse = new Set<string>();
   async running() {
     return this.containers;
   }
   async connectNetwork(net: string, container: string) {
+    if (this.refuse.has(net)) throw new Error(`cannot join ${net}`);
     this.joined.push([net, container]);
   }
-  add(id: string, ip: string, labels: Record<string, string> = {}, net = "bridge") {
+  /** A running container; by default labelled like a DevPod-built devcontainer. */
+  add(
+    id: string,
+    ip: string,
+    labels: Record<string, string> = { "dev.containers.id": id },
+    net = "bridge",
+  ) {
     this.containers.push({ id, name: id, labels, networks: new Map([[net, ip]]) });
   }
   remove(id: string) {

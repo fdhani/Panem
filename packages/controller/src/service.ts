@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   type AddMachineRequest,
   AgentInfo,
+  BackendError,
   type BackendPod,
   DEFAULT_TEMPLATE_ENV,
   type ForwarderState,
@@ -55,6 +56,14 @@ export class HttpError extends Error {
 interface Op {
   state: PodState;
   error?: string;
+  /** The failing step's last output lines (BackendError.detail). */
+  errorLog?: string[];
+}
+
+/** An error op, keeping the backend's output lines when there are any. */
+function errorOp(e: unknown): Op {
+  const detail = e instanceof BackendError ? e.detail : undefined;
+  return { state: "error", error: msg(e), ...(detail?.length ? { errorLog: detail } : {}) };
 }
 
 export interface ServiceDeps {
@@ -409,7 +418,16 @@ export class PodService {
       // Pods from before agents were pluggable always had Claude Code.
       agents: meta.agents ?? LEGACY_AGENTS,
     };
-    if (op) return { ...meta, ...ports, state: op.state, error: op.error, machineStatus };
+    if (op) {
+      return {
+        ...meta,
+        ...ports,
+        state: op.state,
+        error: op.error,
+        errorLog: op.errorLog,
+        machineStatus,
+      };
+    }
     const job = this.d.jobs.forPod(meta.id);
     if (job?.status === "failed") {
       return { ...meta, ...ports, state: "error", error: job.error, machineStatus };
@@ -483,7 +501,8 @@ export class PodService {
     // Git access: give the pod what its repos need, and check it works before building anything.
     const git = await this.prepareGit(repos, template.git, creds);
     // Panem's own Features, for templates that list "./panem-features/<id>" (no registry).
-    await this.d.workspace.installFeatures(devcontainerPathFor(template));
+    // Panem's Features, and the config DevPod gets (a new image whenever they change).
+    const dc = await this.d.workspace.prepareDevcontainer(devcontainerPathFor(template));
     const meta = PodMeta.parse({
       id: newPodId(template.name),
       template: template.name,
@@ -513,13 +532,15 @@ export class PodService {
     }
     env.PANEM_AGENT_ENV = wanted.join(",");
     if (this.d.relaySecret) env.PANEM_RELAY_SECRET = this.d.relaySecret;
+    // Setup checks the image really has these Features (see BOOTSTRAP_CREATE).
+    if (dc.build) env.PANEM_EXPECT_BUILD = dc.build;
     void this.d.backend
       .up({
         id: meta.id,
         machine: machine.name,
         // DevPod uploads the workspace folder to the machine and builds from it.
         source,
-        devcontainerPath: devcontainerPathFor(template),
+        devcontainerPath: dc.path,
         env,
         files: git.plan?.files,
         sshAuthSock: git.agent?.sock,
@@ -539,7 +560,7 @@ export class PodService {
         },
         (e) => {
           this.log(`pod ${meta.id} failed to start: ${msg(e)}`);
-          this.setOp(meta.id, { state: "error", error: msg(e) });
+          this.setOp(meta.id, errorOp(e));
         },
       );
     return this.get(meta.id);
@@ -643,17 +664,75 @@ export class PodService {
     }
   }
 
-  /** Which agents the pod has and how to reach them (~/.panem/agents.json, from the base). */
+  /**
+   * Which agents the pod has, how to reach them (~/.panem/agents.json, from the base), and how
+   * each last reported itself (~/.panem/agents/<id>.status.json, from agent_status).
+   */
   private async recordAgents(id: string): Promise<void> {
-    const r = await this.d.backend.exec(id, `cat "$HOME/.panem/agents.json"`);
+    const r = await this.d.backend.exec(
+      id,
+      // No agents.json fails (an older Feature); no status files is fine.
+      `cat "$HOME/.panem/agents.json" || exit 1; echo ${STATUS_MARK}; for f in "$HOME"/.panem/agents/*.status.json; do if [ -f "$f" ]; then tr -d '\\n' < "$f"; echo; fi; done; exit 0`,
+    );
     if (r.exitCode !== 0) return; // a Feature from before agents were pluggable: see toPod
     try {
-      const agents = z.array(AgentInfo).parse(JSON.parse(new TextDecoder().decode(r.stdout)));
+      const [list = "", statuses = ""] = new TextDecoder().decode(r.stdout).split(STATUS_MARK);
+      const byId = new Map<string, AgentInfo["status"]>();
+      for (const line of statuses.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const s = JSON.parse(line) as {
+            id?: string;
+            state?: string;
+            message?: string;
+            at?: string;
+          };
+          const parsed = AgentInfo.shape.status.safeParse(s);
+          if (s.id && parsed.success) byId.set(s.id, parsed.data);
+        } catch {
+          // One unreadable status file doesn't hide the others.
+        }
+      }
+      const agents = z
+        .array(AgentInfo)
+        .parse(JSON.parse(list))
+        .map((a) => ({ ...a, status: byId.get(a.id) ?? a.status }));
       const current = this.d.pods.get(id);
-      if (current) await this.d.pods.put({ ...current, agents });
+      if (current) {
+        await this.d.pods.put({ ...current, agents });
+        this.publishPods();
+      }
     } catch (e) {
       this.log(`${id}: unreadable agents.json: ${msg(e)}`);
     }
+  }
+
+  /** The last lines of an agent's own log (agent.json "log"), as it wrote them. */
+  async agentLog(id: string, agent: string): Promise<string> {
+    const pod = this.get(id);
+    const a = (pod.agents ?? []).find((x) => x.id === agent);
+    if (!a) throw new HttpError(404, `pod ${id} has no agent ${agent}`);
+    if (!a.log) throw new HttpError(404, `agent ${agent} keeps no log`);
+    if (pod.state !== "running") throw new HttpError(409, `pod ${id} isn't running`);
+    const rel = a.log.slice(2).replace(/'/g, "");
+    const r = await this.d.backend.exec(id, `tail -n 1000 "$HOME/${rel}" 2>/dev/null || true`);
+    return new TextDecoder().decode(r.stdout);
+  }
+
+  /** Restart one agent in a pod (e.g. after `panem pod login`) and re-read its status. */
+  async restartAgent(id: string, agent: string): Promise<Pod> {
+    const pod = this.assertIdle(id);
+    if (!/^[A-Za-z0-9_-]+$/.test(agent) || !(pod.agents ?? []).some((a) => a.id === agent)) {
+      throw new HttpError(404, `pod ${id} has no agent ${agent}`);
+    }
+    if (pod.state !== "running") throw new HttpError(409, `pod ${id} isn't running`);
+    const r = await this.d.backend.exec(
+      id,
+      `PANEM_ONLY_AGENT=${agent} /usr/local/share/panem/post-start.sh`,
+    );
+    if (r.exitCode !== 0) this.log(`${id}: restarting ${agent} failed: ${r.stderr.trim()}`);
+    await this.recordAgents(id);
+    return this.get(id);
   }
 
   /** Where a pod's memory merge base is kept: the memory it was given at copy-in. */
@@ -680,6 +759,12 @@ export class PodService {
     const op = this.ops.get(id);
     if (op && op.state !== "error") throw new HttpError(409, `pod ${id} is busy (${op.state})`);
     return pod;
+  }
+
+  /** The pod's saved `devpod up` / setup output, if the backend keeps one. */
+  async podLog(id: string): Promise<string | undefined> {
+    this.get(id);
+    return this.d.backend.log?.(id);
   }
 
   async stop(id: string): Promise<Pod> {
@@ -711,7 +796,7 @@ export class PodService {
         this.upsertBackend({ id, machine: meta?.machine ?? "", status: done });
         this.setOp(id, undefined);
       },
-      (e) => this.setOp(id, { state: "error", error: msg(e) }),
+      (e) => this.setOp(id, errorOp(e)),
     );
   }
 
@@ -903,6 +988,9 @@ export interface GitCheck {
   checked: boolean;
   problems: GitProblem[];
 }
+
+/** Separates agents.json from the status lines in recordAgents' output. */
+const STATUS_MARK = "---panem-agent-status---";
 
 const REASON_LABEL: Record<GitProblem["reason"], string> = {
   url: "bad URL",

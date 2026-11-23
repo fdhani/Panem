@@ -315,3 +315,29 @@ describe("workspace folder", () => {
     expect(ctl.backend.lastUp?.source).toBe(ws.dir);
   });
 });
+
+test("a pod whose devpod up failed shows the output's last lines", async () => {
+  const { BackendError } = await import("@panem/core");
+  const ws = makeWorkspace();
+  const ctl = await makeController(ws);
+  ctl.backend.up = async () => {
+    const e = new BackendError(
+      "devpod up failed: fatal run agent command: Process exited with status 1",
+    );
+    e.detail = [
+      "info Creating devcontainer...",
+      "fatal run agent command: Process exited with status 1",
+    ];
+    throw e;
+  };
+  const res = await ctl.req("POST", "/api/pods", { template: "shop", machine: "m-vps" });
+  const pod = (await res.json()) as Pod;
+  await until(() => ctl.service.get(pod.id).state === "error");
+  const failed = (await (await ctl.req("GET", "/api/pods")).json()) as Pod[];
+  expect(failed[0]!.errorLog).toEqual([
+    "info Creating devcontainer...",
+    "fatal run agent command: Process exited with status 1",
+  ]);
+  // The mock backend keeps no log files.
+  expect((await ctl.req("GET", `/api/pods/${pod.id}/log`)).status).toBe(404);
+});

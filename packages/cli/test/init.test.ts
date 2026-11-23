@@ -98,11 +98,13 @@ describe("panem workspace", () => {
 test("examples/workspace is exactly what panem workspace init creates", async () => {
   const { SCAFFOLD } = await import("../src/scaffold");
   const root = join(import.meta.dir, "../../../examples/workspace");
-  const files = Bun.spawnSync(["bash", "-c", `cd '${root}' && find . -type f | sort`])
+  // Sorted in JavaScript, not by `sort`, whose order depends on the locale.
+  const files = Bun.spawnSync(["bash", "-c", `cd '${root}' && find . -type f`])
     .stdout.toString()
     .trim()
     .split("\n")
-    .map((f) => f.slice(2));
+    .map((f) => f.slice(2))
+    .sort();
   expect(files).toEqual(Object.keys(SCAFFOLD).sort());
   for (const f of files) expect(readFileSync(join(root, f), "utf8")).toBe(SCAFFOLD[f]!);
 });

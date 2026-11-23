@@ -42,6 +42,13 @@ export function shortHash(s: string | Uint8Array): string {
   return new Bun.CryptoHasher("sha256").update(s).digest("hex").slice(0, 12);
 }
 
+/** One hash of every file Panem's Features are made of: changes whenever any of them does. */
+export async function featuresHash(): Promise<string> {
+  const h = new Bun.CryptoHasher("sha256");
+  for (const f of await panemFeatures()) h.update(`${f.path}\0${f.exec ? 1 : 0}\0`).update(f.data);
+  return h.digest("hex").slice(0, 16);
+}
+
 export interface FeatureFile {
   /** "<feature id>/<path inside it>", e.g. "claude-code/install.sh". */
   path: string;

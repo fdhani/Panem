@@ -1,9 +1,23 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BackendError } from "@panem/core";
-import { DevPodBackend, failureSummary, parseProviders, parseStatus } from "../src";
+import {
+  BOOTSTRAP_CREATE,
+  DevPodBackend,
+  KEEP_LOGS,
+  failureSummary,
+  parseProviders,
+  parseStatus,
+} from "../src";
 
 let dir: string;
 let log: string;
@@ -47,9 +61,8 @@ describe("DevPodBackend", () => {
     expect(l).toContain("ENV CLAUDE_CODE_OAUTH_TOKEN=secret");
     expect(l).toContain('ENV PANEM_POD={"id":"x"}');
     // DevPod skips Feature lifecycle hooks, so setup runs over ssh right after up...
-    expect(calls()[1]).toStartWith(
-      "ARGS ssh shop-abc123 --start-services=false --command if\\ \\[\\ -x\\ /usr/local/share/panem/post-create.sh",
-    );
+    expect(calls()[1]).toStartWith("ARGS ssh shop-abc123 --start-services=false --command ");
+    expect(calls()[1]).toContain("/usr/local/share/panem/post-create.sh");
     // ...but not the start hook: the controller copies synced files in first.
     expect(calls()[1]).not.toContain("post-start");
     expect(calls()).toHaveLength(2);
@@ -289,5 +302,97 @@ describe("git access for pods", () => {
       "clone of backend (git@gitlab.com:o/s.git) at dev failed: git@gitlab.com: Permission denied (publickey).",
     );
     expect(failureSummary("a\nb\nc")).toBe("a | b | c");
+  });
+});
+
+describe("devpod up diagnostics", () => {
+  test("a failed up keeps its cleaned output (escape codes gone, secrets hidden) and saves a log", async () => {
+    const logDir = join(dir, "logs");
+    const be = new DevPodBackend({
+      bin: join(import.meta.dir, "fake-devpod.sh"),
+      env: { FAKE_DIR: dir, FAKE_LOG: log },
+      logDir,
+    });
+    fake(
+      "up",
+      "\x1b[36minfo\x1b[0m Creating devcontainer...\r\x1b[36minfo\x1b[0m Done step\n",
+      1,
+      "\x1b[90mdebug\x1b[0m using token super-secret-token-123\n\x1b[31mfatal\x1b[0m run agent command: Process exited with status 1\n",
+    );
+    let err: unknown;
+    try {
+      await be.up({
+        id: "p1",
+        machine: "m-a",
+        source: "/ws",
+        devcontainerPath: "p",
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "super-secret-token-123" },
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(BackendError);
+    const e = err as BackendError;
+    expect(e.message).toBe(
+      "devpod up failed: fatal run agent command: Process exited with status 1",
+    );
+    expect(e.detail).toEqual([
+      "info Done step",
+      "debug using token ***",
+      "fatal run agent command: Process exited with status 1",
+    ]);
+    const saved = readFileSync(join(logDir, "p1.log"), "utf8");
+    expect(saved).toContain("===== devpod up");
+    expect(saved).not.toContain("\x1b");
+    expect(saved).not.toContain("super-secret-token-123");
+    expect(await be.log("p1")).toBe(saved);
+    expect(calls()[0]).toContain("--debug");
+  });
+
+  test("only the newest logs are kept", async () => {
+    const logDir = join(dir, "logs");
+    const be = new DevPodBackend({
+      bin: join(import.meta.dir, "fake-devpod.sh"),
+      env: { FAKE_DIR: dir, FAKE_LOG: log },
+      logDir,
+    });
+    for (let i = 0; i < KEEP_LOGS + 3; i++) {
+      await be.up({ id: `p${i}`, machine: "m-a", source: "/ws", devcontainerPath: "p", env: {} });
+    }
+    expect(readdirSync(logDir)).toHaveLength(KEEP_LOGS);
+    expect(existsSync(join(logDir, `p${KEEP_LOGS + 2}.log`))).toBe(true);
+  });
+});
+
+describe("setup refuses an image with older Panem Features", () => {
+  const share = () => {
+    const d = mkdtempSync(join(tmpdir(), "share-"));
+    writeFileSync(join(d, "post-create.sh"), "#!/bin/sh\necho setup-ran\n", { mode: 0o755 });
+    return d;
+  };
+  const run = (dir: string, env: Record<string, string>) =>
+    Bun.spawnSync(["bash", "-c", BOOTSTRAP_CREATE.replaceAll("/usr/local/share/panem", dir)], {
+      env: { PATH: process.env.PATH!, HOME: mkdtempSync(join(tmpdir(), "h-")), ...env },
+    });
+
+  test("matching build: setup runs", () => {
+    const d = share();
+    writeFileSync(join(d, "BUILD"), "abc123\n");
+    const r = run(d, { PANEM_EXPECT_BUILD: "abc123" });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.toString()).toContain("setup-ran");
+  });
+
+  test("a stale image fails with what to do; no expectation means no check", () => {
+    const d = share();
+    writeFileSync(join(d, "BUILD"), "old999\n");
+    const r = run(d, { PANEM_EXPECT_BUILD: "abc123" });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain(
+      "panem: this pod was built from a cached image with older Panem Features (build old999, expected abc123)",
+    );
+    expect(r.stdout.toString()).not.toContain("setup-ran");
+    expect(failureSummary(r.stderr.toString())).toContain("Delete the image");
+    expect(run(share(), {}).exitCode).toBe(0);
   });
 });

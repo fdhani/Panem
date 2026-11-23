@@ -1,6 +1,12 @@
 import { join } from "node:path";
 import { DevPodBackend } from "@panem/backend-devpod";
-import { type Config, type PodBackend, dataDir as defaultDataDir, loadConfig } from "@panem/core";
+import {
+  BackendError,
+  type Config,
+  type PodBackend,
+  dataDir as defaultDataDir,
+  loadConfig,
+} from "@panem/core";
 import { createApp } from "./api";
 import { Credentials } from "./credentials";
 import { ForwarderManager, type Forwarders } from "./forwarders";
@@ -36,7 +42,10 @@ export async function createController(o: ControllerOptions) {
   const dir = o.dataDir ?? defaultDataDir();
   const mock = process.env.PANEM_BACKEND === "mock";
   const backend =
-    o.backend ?? (mock ? await seededMock() : new DevPodBackend({ bin: o.config.devpodPath }));
+    o.backend ??
+    (mock
+      ? await seededMock()
+      : new DevPodBackend({ bin: o.config.devpodPath, logDir: join(dir, "logs") }));
   const probe = o.probe ?? (mock ? new StaticProbe() : new TailscaleProbe());
   const forwarders =
     o.forwarders ??
@@ -92,6 +101,20 @@ async function seededMock(): Promise<MockBackend> {
   m.delayMs = 1500;
   // Development: PANEM_MOCK_AGENTS='[{"id":"x","label":"X","connect":[...]}]' to try other agents.
   if (process.env.PANEM_MOCK_AGENTS) m.agentsJson = process.env.PANEM_MOCK_AGENTS;
+  // Development: PANEM_MOCK_UP_FAIL='line1\nline2' fails the next summon with that output.
+  const failLog = process.env.PANEM_MOCK_UP_FAIL;
+  if (failLog) {
+    const up = m.up.bind(m);
+    let failed = false;
+    m.up = async (o) => {
+      if (failed) return up(o);
+      failed = true;
+      const lines = failLog.split("\\n");
+      const e = new BackendError(`devpod up failed: ${lines.at(-1)}`);
+      e.detail = lines;
+      throw e;
+    };
+  }
   await m.addMachine({ name: "m-homeserver", host: "homeserver" });
   await m.addMachine({ name: "m-vps", host: "vps", user: "dev" });
   return m;

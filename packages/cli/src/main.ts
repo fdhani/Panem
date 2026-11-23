@@ -404,6 +404,86 @@ const pod = defineCommand({
         console.log(`starting ${args.id}`);
       },
     }),
+    login: defineCommand({
+      meta: {
+        name: "login",
+        description:
+          "Sign an agent in, in this terminal (run on the controller). The login is kept per machine, so other pods there can use it",
+      },
+      args: {
+        ...podId,
+        agent: {
+          type: "positional",
+          required: false,
+          description: "Agent id (default: the first one with a sign-in)",
+        },
+        all: {
+          type: "boolean",
+          description: "Then restart the agent in the machine's other running pods too",
+        },
+      },
+      async run({ args }) {
+        const c = await client();
+        const id = String(args.id);
+        const p = await c.call<Pod>("GET", `/api/pods/${encodeURIComponent(id)}`);
+        const withLogin = (p.agents ?? []).filter((a) => a.login);
+        const agent = args.agent ? withLogin.find((a) => a.id === args.agent) : withLogin[0];
+        if (!agent) {
+          throw new Error(
+            args.agent
+              ? `pod ${id} has no agent ${args.agent} with a sign-in`
+              : `no agent in pod ${id} has a sign-in`,
+          );
+        }
+        // DevPod lives on the controller: this has to run there.
+        const cfg = await loadConfig().catch(() => undefined);
+        if (!cfg) {
+          throw new Error(
+            `run this on the controller (it uses DevPod there): ssh -t <controller> panem pod login ${id}`,
+          );
+        }
+        console.log(
+          `${agent.login?.label ?? "Sign in"} (${agent.id}) in ${id}. Follow the steps below; the sign-in is yours, Panem never sees it.\n`,
+        );
+        const proc = Bun.spawn(
+          [
+            cfg.devpodPath,
+            "ssh",
+            id,
+            "--start-services=false",
+            "--command",
+            `/usr/local/share/panem/agent-login.sh ${agent.id}`,
+          ],
+          { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, SSH_AUTH_SOCK: "" } },
+        );
+        if ((await proc.exited) !== 0) throw new Error("sign-in didn't finish");
+        const restart = async (pid: string) => {
+          const r = await c.call<Pod>(
+            "POST",
+            `/api/pods/${encodeURIComponent(pid)}/agents/${agent.id}/restart`,
+          );
+          const st = r.agents?.find((a) => a.id === agent.id)?.status;
+          console.log(
+            `${pid}: ${agent.id} ${st?.state ?? "restarted"}${st?.message ? ` (${st.message})` : ""}`,
+          );
+        };
+        await restart(id);
+        if (args.all) {
+          const others = (await c.call<Pod[]>("GET", "/api/pods")).filter(
+            (o) =>
+              o.id !== id &&
+              o.machine === p.machine &&
+              o.state === "running" &&
+              o.agents?.some((a) => a.id === agent.id),
+          );
+          for (const o of others) await restart(o.id);
+        } else {
+          console.log(
+            `Other pods on ${p.machine.replace(/^m-/, "")} use this sign-in from their next start (or run again with --all).`,
+          );
+        }
+      },
+    }),
     rm: defineCommand({
       meta: {
         name: "rm",

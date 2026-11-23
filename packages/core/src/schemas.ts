@@ -43,10 +43,32 @@ export const TemplateHooks = z
 export type TemplateHooks = z.infer<typeof TemplateHooks>;
 
 /** An agent installed in a pod (from ~/.panem/agents.json, written by the Panem base). */
+/** How an agent reports itself (agent_status in the pod; see features/README.md). */
+export const AgentState = z.enum(["running", "needs-login", "stopped", "error"]);
+export type AgentState = z.infer<typeof AgentState>;
+
 export const AgentInfo = z.object({
   id: z.string(),
   label: z.string().default(""),
   connect: z.array(z.object({ label: z.string(), url: z.string().url() })).default([]),
+  /** The agent's own log, shown as it is on its page ("~/…" in the pod). */
+  log: z
+    .string()
+    .regex(/^~\/[A-Za-z0-9._/-]+$/)
+    .refine((p) => !p.includes(".."), "no ..")
+    .optional(),
+  /** The agent's own sign-in, run with `panem pod login`; its files can be shared per machine. */
+  login: z
+    .object({
+      label: z.string().default("Sign in"),
+      command: z.string().optional(),
+      share: z.array(z.string()).optional(),
+    })
+    .optional(),
+  /** Last reported state (from the agent's start hook). */
+  status: z
+    .object({ state: AgentState, message: z.string().default(""), at: z.string().optional() })
+    .optional(),
 });
 export type AgentInfo = z.infer<typeof AgentInfo>;
 
@@ -191,6 +213,8 @@ export type PodServicePort = z.infer<typeof PodServicePort>;
 export const Pod = PodMeta.extend({
   state: PodState,
   error: z.string().optional(),
+  /** The last lines of output from the step that failed (e.g. devpod up), when there are any. */
+  errorLog: z.array(z.string()).optional(),
   machineStatus: MachineStatus,
   services: z.array(PodServicePort).default([]),
   /** Slot 0: an index page listing the pod's services. */

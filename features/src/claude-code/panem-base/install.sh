@@ -34,6 +34,14 @@ mkdir -p "$SHARE/agents"
 cp "$(dirname "$0")"/scripts/*.sh "$SHARE/"
 chmod 755 "$SHARE"/*.sh
 printf '%s\n' "$VERSION" >"$SHARE/VERSION"
+# Which build of Panem's Features this image has (the panemBuild option), checked at setup.
+if [ -n "${PANEMBUILD:-}" ]; then printf '%s\n' "$PANEMBUILD" >"$SHARE/BUILD"; fi
+
+# Where the machine's sign-in volume is mounted. A fresh Docker volume takes this folder's
+# permissions, so pod users can write to it.
+LOGINS="${PANEM_INSTALL_LOGINS:-/var/lib/panem/logins}"
+mkdir -p "$LOGINS"
+chmod 1777 "$LOGINS"
 
 mkdir -p "$CODE_ROOT"
 chown "$REMOTE_USER" "$CODE_ROOT" 2>/dev/null || true

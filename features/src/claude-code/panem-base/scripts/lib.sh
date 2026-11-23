@@ -53,3 +53,46 @@ primary_repo_dir() {
     printf '%s' "$PANEM_CODE_ROOT"
   fi
 }
+
+# ---- agents: status and shared sign-ins (the agent contract, features/README.md) ----
+
+# A Docker volume per machine (mounted here by the controller's generated config) that keeps
+# agents' sign-in files, so one sign-in serves every pod on that machine.
+PANEM_LOGINS_DIR="${PANEM_LOGINS_DIR:-/var/lib/panem/logins}"
+
+# The calling agent's id: its folder's name (hooks live in <share>/agents/<id>/).
+agent_id() {
+  printf '%s' "${PANEM_AGENT_ID:-$(basename "$(cd "$(dirname "$0")" && pwd)")}"
+}
+
+# Report how an agent is doing, for the pod card:
+#   agent_status running|needs-login|stopped|error [message]
+agent_status() {
+  local id dir
+  id="$(agent_id)"
+  dir="$PANEM_STATE_DIR/agents"
+  mkdir -p "$dir"
+  jq -n --arg id "$id" --arg state "$1" --arg message "${2:-}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{id: $id, state: $state, message: $message, at: $at}' >"$dir/$id.status.json.tmp" &&
+    mv "$dir/$id.status.json.tmp" "$dir/$id.status.json"
+}
+
+# Keep an agent's sign-in files (agent.json "login.share", relative to $HOME) in the machine's
+# volume, linked from where the agent expects them. A login already in the pod moves there if
+# the volume has none yet. Without the volume, nothing changes.
+link_agent_logins() {
+  local dir="$1" id rel src dst
+  id="$(basename "$dir")"
+  [ -f "$dir/agent.json" ] && [ -d "$PANEM_LOGINS_DIR" ] && [ -w "$PANEM_LOGINS_DIR" ] || return 0
+  while IFS= read -r rel; do
+    case "$rel" in "" | /* | *..*) continue ;; esac
+    src="$HOME/$rel"
+    dst="$PANEM_LOGINS_DIR/$id/$rel"
+    mkdir -p "$(dirname "$dst")" "$(dirname "$src")"
+    chmod 700 "$PANEM_LOGINS_DIR/$id" 2>/dev/null || true
+    if [ -f "$src" ] && [ ! -L "$src" ]; then
+      if [ ! -e "$dst" ]; then mv "$src" "$dst"; else rm -f "$src"; fi
+    fi
+    [ "$(readlink "$src" 2>/dev/null)" = "$dst" ] || ln -sfn "$dst" "$src"
+  done < <(jq -r '.login.share[]? // empty' "$dir/agent.json" 2>/dev/null)
+}
