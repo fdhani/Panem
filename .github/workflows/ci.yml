@@ -53,8 +53,4 @@ jobs:
             "https://github.com/loft-sh/devpod/releases/download/${DEVPOD_VERSION}/devpod-linux-amd64"
           chmod +x /usr/local/bin/devpod
           devpod version
-      - name: Build forwarder image
-        run: |
-          v=$(bun -e 'import { PANEM_VERSION } from "@panem/core"; console.log(PANEM_VERSION)')
-          docker build -f packages/forwarder/Dockerfile -t "ghcr.io/fdhani/panem/forwarder:$v" .
       - run: bun scripts/integration.ts

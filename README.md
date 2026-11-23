@@ -91,6 +91,10 @@ With the folder as a git repo (`git init`, add a remote, push once), templates y
 - **A failing hook never blocks anything.** A failed pull means the summon uses the folder as it is. A failed push means the memory is still safe in the folder, and the next save pushes it. Failures go to the controller log with their last lines of output.
 - They're read from the folder's current `panem.json` each time. A misspelt hook name shows as a template error.
 
+### Panem's Features
+
+Templates list Panem's devcontainer Features by a local path, e.g. `"./panem-features/claude-code"`. At every summon Panem writes them next to the template's `devcontainer.json`, in `panem-features/` (always the running version, with a `.gitignore` so a git-backed workspace stays clean), and DevPod uploads them with the workspace. Nothing has to be published to a registry. A template still listing `ghcr.io/fdhani/panem/claude-code:0` gets a warning on the Summon page: change it to the local path.
+
 ## How a pod is built
 
 1. The controller reads the template from the workspace folder, resolves the pod's sync rules from `panem.json` (see below), and saves them with the pod.
@@ -106,6 +110,8 @@ Inside the pod: your code is in `/codebase/<repo>`; Panem's files are in `~/.pan
 ## Reaching pod services (ports)
 
 Each machine runs one `panem-forwarder` container, which the controller deploys over SSH. It publishes ports **only on that machine's Tailscale IP**, so traffic goes straight to the machine without passing through the home server.
+
+Nothing is downloaded from Panem: like DevPod injecting its own agent, the controller copies the forwarder's code (one ~75 KB JS file, to `~/.panem-forwarder/` on the machine) and runs it with the official `oven/bun` image from Docker Hub, the same Bun version Panem is built with. A new Panem version (or changed code) redeploys it. Set `forwarder.image` in the config to run a prebuilt image instead.
 
 ```
 phone ──tailnet──▶ vps:7601 ──▶ panem-forwarder ──docker network──▶ relay in pod :7699 ──▶ localhost:5173
@@ -275,7 +281,7 @@ DEVPOD=devpod bun scripts/integration.ts   # real DevPod + Docker end to end (al
 | `packages/core` | zod schemas, the `PodBackend` interface, naming, config |
 | `packages/backend-devpod` | `PodBackend` on the DevPod CLI (`Bun.spawn`, pinned version) |
 | `packages/controller` | Hono API + SSE, pod service, export worker, forwarder management, mock backend |
-| `packages/forwarder` | Per-machine port forwarder (container image) |
+| `packages/forwarder` | Per-machine port forwarder (one JS file, run with the official Bun image) |
 | `packages/web` | React SPA (TanStack Router and Query, Tailwind) |
 | `packages/cli` | `panem` command (citty); `serve` runs the controller |
 | `features/src/panem` | devcontainer Feature: the agent-agnostic pod base (repos, relay, agent hooks) |

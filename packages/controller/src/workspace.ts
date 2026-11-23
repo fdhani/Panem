@@ -1,8 +1,12 @@
 import { existsSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { PanemConfig, type WorkspaceHookName } from "@panem/core";
 import { Mutex } from "./git";
+import { panemFeatures } from "./machine-assets";
+
+/** Folder next to a template's devcontainer.json where Panem keeps its Features up to date. */
+export const FEATURES_DIR = "panem-features";
 
 export interface HookResult {
   /** False when panem.json defines no such hook. */
@@ -112,5 +116,49 @@ export class Workspace {
       ok: false,
       error: `workspace hook ${name} ${why}${tail ? `: ${tail}` : ""}`,
     };
+  }
+
+  /**
+   * Put Panem's devcontainer Features (the running version) next to a template's
+   * devcontainer.json, in panem-features/<id>/, so templates can list "./panem-features/<id>"
+   * and DevPod uploads them with the workspace: no registry. Writes only what changed and
+   * removes files older versions left behind. A .gitignore keeps them out of a git-backed
+   * workspace (DevPod only honours .devpodignore, so they're still uploaded).
+   */
+  async installFeatures(devcontainerPath: string): Promise<{ written: number }> {
+    return this.lock.run(async () => {
+      const root = resolve(await this.dir());
+      const dir = resolve(root, dirname(devcontainerPath), FEATURES_DIR);
+      if (!dir.startsWith(root + sep)) throw new Error("devcontainer path escapes the workspace");
+      const files = await panemFeatures();
+      const wanted = new Set(files.map((f) => f.path));
+      let written = 0;
+      for (const f of files) {
+        const dest = join(dir, f.path);
+        const same = await readFile(dest).then(
+          (b) => Buffer.from(b).equals(Buffer.from(f.data)),
+          () => false,
+        );
+        if (!same) {
+          await mkdir(dirname(dest), { recursive: true });
+          await writeFile(dest, f.data);
+          written++;
+        }
+        await chmod(dest, f.exec ? 0o755 : 0o644);
+      }
+      const existing = existsSync(dir)
+        ? await readdir(dir, { recursive: true, withFileTypes: true })
+        : [];
+      for (const e of existing) {
+        if (!e.isFile()) continue;
+        const rel = relative(dir, join(e.parentPath, e.name)).split(sep).join("/");
+        if (rel !== ".gitignore" && !wanted.has(rel)) await rm(join(dir, rel), { force: true });
+      }
+      const ignore = join(dir, ".gitignore");
+      if (!existsSync(ignore)) {
+        await writeFile(ignore, "# Written by Panem at each summon (its own Features).\n*\n");
+      }
+      return { written };
+    });
   }
 }

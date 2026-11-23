@@ -5,7 +5,8 @@ import {
   type ForwarderState,
   PANEM_VERSION,
 } from "@panem/core";
-import { ForwarderManager, type Forwarders } from "../src/forwarders";
+import { BUN_IMAGE, ForwarderManager, type Forwarders } from "../src/forwarders";
+import { forwarderBundle, shortHash } from "../src/machine-assets";
 import { parseTailscaleIPs } from "../src/probe";
 import type { MachineShell, ShellResult } from "../src/shell";
 import { shq } from "../src/shell";
@@ -40,48 +41,77 @@ const mgr = (shell: FakeShell, peers = new Map([["vps", "100.64.0.5"]])) =>
   });
 
 describe("ForwarderManager", () => {
-  test("deploys bound to the Tailscale IP with secrets on stdin only", async () => {
+  test("deploys the forwarder's code to the machine and runs it with the public Bun image", async () => {
     const shell = new FakeShell();
-    shell.replies.push([/docker inspect/, { code: 1, stderr: "No such object" }]);
+    shell.replies.push(
+      [/docker inspect/, { code: 1, stderr: "No such object" }],
+      [/^sh -c/, { stdout: "/home/dev/.panem-forwarder\n" }],
+    );
     const st = await mgr(shell).ensure(vps);
     expect(st).toEqual({ status: "running", version: PANEM_VERSION, address: "100.64.0.5" });
-    expect(shell.cmds()).toEqual(["docker inspect", "docker rm", "docker pull", "docker run"]);
+    expect(shell.cmds()).toEqual([
+      "docker inspect",
+      "docker rm",
+      "docker pull",
+      "sh -c",
+      "docker run",
+    ]);
+    expect(shell.calls[2]!.argv).toEqual(["docker", "pull", BUN_IMAGE]);
+    expect(BUN_IMAGE).toBe(`oven/bun:${Bun.version}-alpine`);
+
+    // The bundle goes over stdin, under a name carrying its content hash.
+    const bundle = await forwarderBundle();
+    const hash = shortHash(bundle);
+    const put = shell.calls[3]!;
+    expect(put.stdin).toBe(bundle);
+    expect(put.argv[2]).toContain(`forwarder-${hash}.js`);
+    expect(put.argv[2]).toContain('rm -f "$d"/forwarder-*.js');
+
     const run = shell.calls.at(-1)!;
     const line = run.argv.join(" ");
     expect(line).toContain("-p 100.64.0.5:7599:7599");
     expect(line).toContain("-p 100.64.0.5:7600-7699:7600-7699");
     expect(line).toContain("--restart unless-stopped");
+    expect(line).toContain(`--label dev.panem.bundle=${hash}`);
+    expect(line).toContain("-v /home/dev/.panem-forwarder:/app:ro");
+    expect(run.argv.slice(-3)).toEqual([BUN_IMAGE, "bun", `/app/forwarder-${hash}.js`]);
     expect(line).not.toContain("0.0.0.0");
+    expect(line).not.toContain("ghcr.io");
     expect(line).not.toContain("relay-secret");
     expect(line).not.toContain("fwd-token");
     expect(run.stdin).toContain("PANEM_RELAY_SECRET=relay-secret-0123456789");
     expect(run.stdin).toContain("PANEM_FORWARDER_TOKEN=fwd-token-0123456789");
-    expect(run.argv.at(-1)).toBe(`ghcr.io/fdhani/panem/forwarder:${PANEM_VERSION}`);
   });
 
-  test("leaves a matching forwarder alone; recreates an old one", async () => {
+  test("leaves a matching forwarder alone; recreates an old version or changed code", async () => {
+    const hash = shortHash(await forwarderBundle());
     const ok = new FakeShell();
-    ok.replies.push([
-      /docker inspect/,
-      { stdout: `ghcr.io/fdhani/panem/forwarder:${PANEM_VERSION}|true|${PANEM_VERSION}\n` },
-    ]);
+    ok.replies.push([/docker inspect/, { stdout: `${BUN_IMAGE}|true|${PANEM_VERSION}|${hash}\n` }]);
     await mgr(ok).ensure(vps);
     expect(ok.cmds()).toEqual(["docker inspect"]);
 
-    const old = new FakeShell();
-    old.replies.push([
-      /docker inspect/,
-      { stdout: "ghcr.io/fdhani/panem/forwarder:0.1.0|true|0.1.0" },
-    ]);
-    await mgr(old).ensure(vps);
-    expect(old.cmds()).toContain("docker run");
+    for (const stdout of [
+      `ghcr.io/fdhani/panem/forwarder:${PANEM_VERSION}|true|${PANEM_VERSION}|<no value>`,
+      `${BUN_IMAGE}|true|0.1.0|${hash}`,
+      `${BUN_IMAGE}|true|${PANEM_VERSION}|0123456789ab`,
+      `${BUN_IMAGE}|false|${PANEM_VERSION}|${hash}`,
+    ]) {
+      const old = new FakeShell();
+      old.replies.push(
+        [/docker inspect/, { stdout }],
+        [/^sh -c/, { stdout: "/root/.panem-forwarder\n" }],
+      );
+      await mgr(old).ensure(vps);
+      expect(old.cmds()).toContain("docker run");
+    }
   });
 
-  test("pull failure is fine with a local image, fatal without", async () => {
+  test("an image that can't be pulled is fine if the machine has it, fatal without", async () => {
     const local = new FakeShell();
     local.replies.push(
       [/docker inspect/, { code: 1 }],
-      [/docker pull/, { code: 1, stderr: "denied" }],
+      [/docker pull/, { code: 1, stderr: "no internet" }],
+      [/^sh -c/, { stdout: "/root/.panem-forwarder\n" }],
     );
     await mgr(local).ensure(vps);
     expect(local.cmds()).toContain("docker run");
@@ -93,6 +123,30 @@ describe("ForwarderManager", () => {
       [/docker image inspect/, { code: 1 }],
     );
     await expect(mgr(none).ensure(vps)).rejects.toThrow("manifest unknown");
+  });
+
+  test("a failed copy of the forwarder's code is reported", async () => {
+    const shell = new FakeShell();
+    shell.replies.push(
+      [/docker inspect/, { code: 1 }],
+      [/^sh -c/, { code: 1, stderr: "No space left on device" }],
+    );
+    await expect(mgr(shell).ensure(vps)).rejects.toThrow("No space left on device");
+    expect(shell.cmds()).not.toContain("docker run");
+  });
+
+  test("config.forwarder.image still runs a prebuilt image, with no code copied", async () => {
+    const custom = new ForwarderManager(
+      ConfigSchema.parse({ ...cfg, forwarder: { image: "registry.local/forwarder:dev" } }),
+      Object.assign(new FakeShell(), {}),
+      { peerIPs: async () => new Map([["vps", "100.64.0.5"]]) },
+    );
+    const shell = (custom as unknown as { shell: FakeShell }).shell;
+    shell.replies.push([/docker inspect/, { code: 1 }]);
+    await custom.ensure(vps);
+    expect(shell.cmds()).toEqual(["docker inspect", "docker rm", "docker pull", "docker run"]);
+    expect(shell.calls.at(-1)!.argv.at(-1)).toBe("registry.local/forwarder:dev");
+    expect(shell.calls.at(-1)!.argv.join(" ")).not.toContain("/app");
   });
 
   test("Tailscale IP: peer list first, then `tailscale ip -4` on the machine", async () => {
@@ -363,4 +417,41 @@ describe("pod service with forwarders", () => {
     await off.service.refresh();
     expect(off.service.machines()[0]?.forwarder).toEqual({ status: "disabled" });
   });
+});
+
+test("the forwarder bundle runs with plain `bun` and answers /state", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "panem-fwd-bundle-"));
+  writeFileSync(join(dir, "forwarder.js"), await forwarderBundle());
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const p = Bun.spawn(["bun", join(dir, "forwarder.js")], {
+    env: {
+      PATH: process.env.PATH!,
+      PANEM_FORWARDER_TOKEN: "t".repeat(16),
+      PANEM_RELAY_SECRET: "r".repeat(16),
+      PANEM_PORT_RANGE: `${port + 1}-${port + 10}`,
+      PANEM_BLOCK_SIZE: "10",
+      PANEM_CONTROL_PORT: String(port),
+      PANEM_DATA: dir,
+      DOCKER_SOCKET: join(dir, "no-docker.sock"),
+    },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  try {
+    let body: { version?: string } | undefined;
+    for (let i = 0; i < 50 && !body; i++) {
+      await Bun.sleep(100);
+      body = await fetch(`http://127.0.0.1:${port}/state`, {
+        headers: { authorization: `Bearer ${"t".repeat(16)}` },
+      })
+        .then((r) => (r.ok ? (r.json() as Promise<{ version: string }>) : undefined))
+        .catch(() => undefined);
+    }
+    expect(body?.version).toBe(PANEM_VERSION);
+  } finally {
+    p.kill();
+  }
 });

@@ -1,12 +1,12 @@
 import {
   type Config,
   FORWARDER_CONTAINER,
-  FORWARDER_IMAGE,
   type ForwarderState as FState,
   ForwarderState,
   type ForwarderStatus,
   PANEM_VERSION,
 } from "@panem/core";
+import { forwarderBundle, shortHash } from "./machine-assets";
 import { tailscaleIPv4, tailscalePeerIPs } from "./probe";
 import type { MachineShell } from "./shell";
 
@@ -30,6 +30,16 @@ export interface Forwarders {
 }
 
 const VERSION_LABEL = "dev.panem.version";
+const BUNDLE_LABEL = "dev.panem.bundle";
+
+/**
+ * The public image the forwarder runs in (Docker Hub, Intel and ARM): Bun, the same version
+ * Panem is built with. Panem copies the forwarder's code next to it; nothing is published.
+ */
+export const BUN_IMAGE = `oven/bun:${Bun.version}-alpine`;
+
+/** Where the forwarder's code lives on each machine (mounted read-only into the container). */
+const BUNDLE_DIR = "$HOME/.panem-forwarder";
 
 /**
  * Deploys and talks to the panem-forwarder container on each machine.
@@ -37,7 +47,8 @@ const VERSION_LABEL = "dev.panem.version";
  */
 export class ForwarderManager implements Forwarders {
   readonly enabled: boolean;
-  private readonly image: string;
+  /** A prebuilt forwarder image (config.forwarder.image), or undefined to run the bundle. */
+  private readonly customImage?: string;
   private readonly addrCache = new Map<string, string>();
 
   constructor(
@@ -50,7 +61,7 @@ export class ForwarderManager implements Forwarders {
     } = {},
   ) {
     this.enabled = Boolean(cfg.relaySecret && cfg.forwarderToken);
-    this.image = cfg.forwarder.image ?? `${FORWARDER_IMAGE}:${PANEM_VERSION}`;
+    this.customImage = cfg.forwarder.image;
   }
 
   /** The machine's Tailscale IPv4: published ports bind to it, and state is fetched from it. */
@@ -119,10 +130,17 @@ export class ForwarderManager implements Forwarders {
     if (!res.ok) throw new Error(`forwarder release: ${res.status}`);
   }
 
-  /** docker run arguments; secrets go through --env-file on stdin, never argv. */
-  runArgs(address: string): { argv: string[]; env: string } {
+  /**
+   * docker run arguments; secrets go through --env-file on stdin, never argv. With `bundle`,
+   * the public Bun image runs the forwarder code from the machine's bundle folder.
+   */
+  runArgs(
+    address: string,
+    bundle?: { dir: string; file: string; hash: string },
+  ): { argv: string[]; env: string } {
     const { portRange, controlPort, blockSize } = this.cfg.forwarder;
     const range = `${portRange[0]}-${portRange[1]}`;
+    const image = bundle ? BUN_IMAGE : (this.customImage ?? "");
     return {
       argv: [
         "docker",
@@ -134,6 +152,7 @@ export class ForwarderManager implements Forwarders {
         "unless-stopped",
         "--label",
         `${VERSION_LABEL}=${PANEM_VERSION}`,
+        ...(bundle ? ["--label", `${BUNDLE_LABEL}=${bundle.hash}`] : []),
         "-p",
         `${address}:${controlPort}:${controlPort}`,
         "-p",
@@ -142,9 +161,11 @@ export class ForwarderManager implements Forwarders {
         "/var/run/docker.sock:/var/run/docker.sock",
         "-v",
         "panem-forwarder:/data",
+        ...(bundle ? ["-v", `${bundle.dir}:/app:ro`] : []),
         "--env-file",
         "/dev/stdin",
-        this.image,
+        image,
+        ...(bundle ? ["bun", `/app/${bundle.file}`] : []),
       ],
       env: [
         `PANEM_FORWARDER_TOKEN=${this.cfg.forwarderToken}`,
@@ -157,34 +178,61 @@ export class ForwarderManager implements Forwarders {
     };
   }
 
-  /** Make sure the right forwarder version runs on the machine. Idempotent. */
+  /**
+   * Make sure the right forwarder runs on the machine. Idempotent. By default the controller
+   * copies the forwarder's code (one JS file) to the machine and runs it with the public Bun
+   * image, so nothing has to be published; `config.forwarder.image` runs a prebuilt image.
+   */
   async ensure(m: MachineRef): Promise<ForwarderStatus> {
     if (!this.enabled) return { status: "disabled" };
     const address = await this.address(m);
+    const code = this.customImage ? undefined : await forwarderBundle();
+    const hash = code === undefined ? "" : shortHash(code);
+    const image = this.customImage ?? BUN_IMAGE;
     const inspect = await this.shell.run(m, [
       "docker",
       "inspect",
       "--format",
-      `{{.Config.Image}}|{{.State.Running}}|{{index .Config.Labels "${VERSION_LABEL}"}}`,
+      `{{.Config.Image}}|{{.State.Running}}|{{index .Config.Labels "${VERSION_LABEL}"}}|{{index .Config.Labels "${BUNDLE_LABEL}"}}`,
       FORWARDER_CONTAINER,
     ]);
-    const [image, running, version] = inspect.stdout.trim().split("|");
+    const [cur, running, version, curHash = ""] = inspect.stdout.trim().split("|");
     if (
       inspect.code === 0 &&
-      image === this.image &&
+      cur === image &&
       running === "true" &&
-      version === PANEM_VERSION
+      version === PANEM_VERSION &&
+      curHash.replace("<no value>", "") === hash
     ) {
       return { status: "running", version, address };
     }
     await this.shell.run(m, ["docker", "rm", "-f", FORWARDER_CONTAINER]);
-    const pull = await this.shell.run(m, ["docker", "pull", this.image], { timeoutMs: 600_000 });
+    const pull = await this.shell.run(m, ["docker", "pull", image], { timeoutMs: 600_000 });
     if (pull.code !== 0) {
-      // A locally built image is fine (dev, CI); otherwise surface the pull error.
-      const local = await this.shell.run(m, ["docker", "image", "inspect", this.image]);
-      if (local.code !== 0) throw new Error(`docker pull ${this.image}: ${lastLine(pull.stderr)}`);
+      // A local image is fine (dev, CI, offline machines); otherwise surface the pull error.
+      const local = await this.shell.run(m, ["docker", "image", "inspect", image]);
+      if (local.code !== 0) throw new Error(`docker pull ${image}: ${lastLine(pull.stderr)}`);
     }
-    const { argv, env } = this.runArgs(address);
+    let bundle: { dir: string; file: string; hash: string } | undefined;
+    if (code !== undefined) {
+      const file = `forwarder-${hash}.js`;
+      // Replace older bundles, write the new one, and print the folder's absolute path.
+      const put = await this.shell.run(
+        m,
+        [
+          "sh",
+          "-c",
+          `d="${BUNDLE_DIR}" && mkdir -p "$d" && rm -f "$d"/forwarder-*.js && cat > "$d/.${file}.tmp" && mv "$d/.${file}.tmp" "$d/${file}" && echo "$d"`,
+        ],
+        { stdin: code },
+      );
+      const dir = put.stdout.trim().split("\n").at(-1) ?? "";
+      if (put.code !== 0 || !dir.startsWith("/")) {
+        throw new Error(`copying the forwarder to ${m.host}: ${lastLine(put.stderr)}`);
+      }
+      bundle = { dir, file, hash };
+    }
+    const { argv, env } = this.runArgs(address, bundle);
     const run = await this.shell.run(m, argv, { stdin: env });
     if (run.code !== 0) throw new Error(`docker run: ${lastLine(run.stderr)}`);
     return { status: "running", version: PANEM_VERSION, address };
