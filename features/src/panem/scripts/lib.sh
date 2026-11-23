@@ -77,22 +77,60 @@ agent_status() {
     mv "$dir/$id.status.json.tmp" "$dir/$id.status.json"
 }
 
+# Whether the machine's sign-in volume is mounted here. A pod built before sign-ins were
+# shared has only the image's own (empty) folder, so a sign-in there stays in that pod.
+PANEM_MOUNTINFO="${PANEM_MOUNTINFO:-/proc/self/mountinfo}"
+logins_mounted() {
+  awk -v d="$PANEM_LOGINS_DIR" '$5 == d { found = 1 } END { exit !found }' "$PANEM_MOUNTINFO" 2>/dev/null
+}
+
+# Record whether this pod shares the machine's sign-in for an agent, and if not, why:
+#   login_shared <id> true|false [reason]  ->  ~/.panem/agents/<id>.login.json
+login_shared() {
+  local dir="$PANEM_STATE_DIR/agents"
+  mkdir -p "$dir"
+  jq -n --argjson shared "$2" --arg reason "${3:-}" \
+    '{shared: $shared} + (if $reason == "" then {} else {reason: $reason} end)' >"$dir/$1.login.json.tmp" &&
+    mv "$dir/$1.login.json.tmp" "$dir/$1.login.json"
+}
+
 # Keep an agent's sign-in files (agent.json "login.share", relative to $HOME) in the machine's
 # volume, linked from where the agent expects them. A login already in the pod moves there if
-# the volume has none yet. Without the volume, nothing changes.
+# the volume has none yet. When the pod can't share (no volume, not writable), it says why in
+# ~/.panem/agents/<id>.login.json and the agent keeps its sign-in in the pod.
 link_agent_logins() {
-  local dir="$1" id rel src dst
+  local dir="$1" id rel src dst share owner
   id="$(basename "$dir")"
-  [ -f "$dir/agent.json" ] && [ -d "$PANEM_LOGINS_DIR" ] && [ -w "$PANEM_LOGINS_DIR" ] || return 0
+  [ -f "$dir/agent.json" ] || return 0
+  share="$(jq -r '.login.share[]? // empty' "$dir/agent.json" 2>/dev/null || true)"
+  [ -n "$share" ] || return 0
+  if ! logins_mounted; then
+    login_shared "$id" false "this pod has no shared sign-in volume (it was built before sign-ins were shared). Summon it again to use the machine's sign-in."
+    return 0
+  fi
+  # Docker gives a new volume its folder's owner and mode from the image; one created another
+  # way may be root's. Fix that when the pod user can.
+  [ -w "$PANEM_LOGINS_DIR" ] || sudo -n chmod 1777 "$PANEM_LOGINS_DIR" 2>/dev/null || true
+  if [ ! -w "$PANEM_LOGINS_DIR" ]; then
+    login_shared "$id" false "the machine's sign-in volume isn't writable by $(id -un)"
+    return 0
+  fi
+  if [ -e "$PANEM_LOGINS_DIR/$id" ] && [ ! -w "$PANEM_LOGINS_DIR/$id" ]; then
+    owner="$(stat -c %u "$PANEM_LOGINS_DIR/$id" 2>/dev/null || echo "?")"
+    login_shared "$id" false "the machine's sign-in for $id belongs to another user (uid $owner); pods running as $(id -un) can't use it"
+    return 0
+  fi
+  mkdir -p "$PANEM_LOGINS_DIR/$id"
+  chmod 700 "$PANEM_LOGINS_DIR/$id" 2>/dev/null || true
   while IFS= read -r rel; do
     case "$rel" in "" | /* | *..*) continue ;; esac
     src="$HOME/$rel"
     dst="$PANEM_LOGINS_DIR/$id/$rel"
     mkdir -p "$(dirname "$dst")" "$(dirname "$src")"
-    chmod 700 "$PANEM_LOGINS_DIR/$id" 2>/dev/null || true
     if [ -f "$src" ] && [ ! -L "$src" ]; then
       if [ ! -e "$dst" ]; then mv "$src" "$dst"; else rm -f "$src"; fi
     fi
     [ "$(readlink "$src" 2>/dev/null)" = "$dst" ] || ln -sfn "$dst" "$src"
-  done < <(jq -r '.login.share[]? // empty' "$dir/agent.json" 2>/dev/null)
+  done <<<"$share"
+  login_shared "$id" true
 }

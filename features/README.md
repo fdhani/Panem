@@ -81,9 +81,10 @@ Hooks run as the pod user. They can `. "$(dirname "$0")/../../lib.sh"` for the b
   "share": [".claude/.credentials.json"]
 }
 ```
-- `command` is the agent's own interactive sign-in. `panem pod login <pod> [agent]` runs it in the user's terminal through the base's `agent-login.sh`, then restarts just that agent (`PANEM_ONLY_AGENT=<id> post-start.sh`).
-- `share` lists files, relative to `$HOME`, that hold the login. Before each start, the base keeps them in `/var/lib/panem/logins/<id>/` and links them back. That's a Docker volume per machine (`panem-logins`), mounted by the controller's generated config, so one sign-in serves every pod on the machine. Without the volume nothing changes.
-- When `start.sh` finds no usable login, report `needs-login`: the card then tells the user what to run.
+- `command` is the agent's own interactive sign-in. The web UI's **Sign in** (Machines page, or the agent's page) runs it in a terminal in the browser; `panem machine login <machine> [agent]` and `panem pod login <pod> [agent]` run it in the user's own terminal. All of them go through the base's `agent-login.sh`, then restart the agent in that pod and in the machine's other pods waiting for a sign-in (`PANEM_ONLY_AGENT=<id> post-start.sh`). Panem passes the terminal through and never reads or keeps what's in it.
+- `share` lists files, relative to `$HOME`, that hold the login. Before each start, the base keeps them in `/var/lib/panem/logins/<id>/` and links them back. That's a Docker volume per machine (`panem-logins`), mounted by the controller's generated config, so one sign-in serves every pod on the machine.
+- The base records whether the pod shares the machine's sign-in in `~/.panem/agents/<id>.login.json`: `{"shared": true}`, or `{"shared": false, "reason": "…"}` when the volume isn't mounted, isn't writable (it first tries `sudo -n chmod 1777`), or holds another user's sign-in. The UI shows the reason; an agent's `start.sh` may add it to its message.
+- When `start.sh` finds no usable login, report `needs-login`: the UI then offers the agent's sign-in.
 
 To work in templates that list only the agent, the Feature carries the base as `panem-base/` and installs it when it's missing or older (see `src/claude-code/install.sh`).
 - `bun scripts/vendor-feature-base.ts` refreshes every agent's copy.

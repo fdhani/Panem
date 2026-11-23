@@ -25,7 +25,11 @@ fi
 method="$(env -u CLAUDE_CODE_OAUTH_TOKEN claude auth status --json 2>/dev/null | jq -r '.authMethod // empty' 2>/dev/null || true)"
 if [ "$method" != "claude.ai" ]; then
   log "Remote Control needs a claude.ai sign-in; not started"
-  agent_status needs-login "Remote Control needs a claude.ai sign-in (a setup-token only covers model requests)"
+  why="Remote Control needs a claude.ai sign-in (a setup-token only covers model requests)"
+  # Whether a sign-in here would cover the machine's other pods (see link_agent_logins).
+  unshared="$(jq -r 'select(.shared == false) | .reason // empty' "$PANEM_STATE_DIR/agents/$(agent_id).login.json" 2>/dev/null || true)"
+  [ -z "$unshared" ] || why="$why. This pod can't use the machine's sign-in: $unshared"
+  agent_status needs-login "$why"
   exit 0
 fi
 
